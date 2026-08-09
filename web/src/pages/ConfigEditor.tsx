@@ -561,7 +561,7 @@ function ProviderProxyField({
   proxy: ProxyConfig | undefined
   onChange: (p: ProxyConfig | undefined) => void
 }) {
-  const mode = proxy?.disabled ? 'disabled' : proxy?.url ? 'custom' : 'inherit'
+  const mode = proxy?.disabled ? 'disabled' : (proxy && 'url' in proxy) ? 'custom' : 'inherit'
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
