@@ -166,9 +166,13 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 				if len(out) == 0 {
 					continue
 				}
-				// CLIProxyAPI translators return bare JSON bytes without SSE framing.
-				// Wrap in "data: ...\n\n" so the client receives valid SSE.
-				if !bytes.HasPrefix(out, []byte("data:")) {
+				// CLIProxyAPI translators may return either:
+				//   (a) a complete SSE frame: "event: ...\ndata: ...\n\n"
+				//   (b) bare JSON bytes (legacy path)
+				// Only wrap case (b) with "data: ...\n\n". A complete SSE frame
+				// already starts with "event:" or "data:" and must not be double-wrapped.
+				isSSEFrame := bytes.HasPrefix(out, []byte("data:")) || bytes.HasPrefix(out, []byte("event:"))
+				if !isSSEFrame {
 					out = append([]byte("data: "), append(out, '\n', '\n')...)
 				}
 				_, werr := w.Write(out)
