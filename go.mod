@@ -58,4 +58,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 )
 
-replace github.com/router-for-me/CLIProxyAPI/v7 => ../CLIProxyAPI
