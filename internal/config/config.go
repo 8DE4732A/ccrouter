@@ -86,6 +86,8 @@ type ApiEndpoint struct {
 }
 
 // ChatURL returns the full upstream URL for this endpoint.
+// For gemini, only the base is returned; the model name must be appended by the caller
+// via AppendGeminiModel.
 func (e *ApiEndpoint) ChatURL() string {
 	base := strings.TrimRight(e.BaseURL, "/")
 	switch e.APIFormat {
@@ -96,11 +98,20 @@ func (e *ApiEndpoint) ChatURL() string {
 	case "openai-images":
 		return base + "/images/generations"
 	case "gemini":
-		// Gemini generateContent endpoint; model name is appended dynamically by the caller.
 		return base + "/models"
 	default:
 		return base + "/chat/completions"
 	}
+}
+
+// GeminiChatURL returns the full Gemini generateContent URL for the given model name.
+// stream=true uses streamGenerateContent?alt=sse (SSE format), stream=false uses generateContent.
+func GeminiChatURL(base, model string, stream bool) string {
+	base = strings.TrimRight(base, "/")
+	if stream {
+		return base + "/models/" + model + ":streamGenerateContent?alt=sse"
+	}
+	return base + "/models/" + model + ":generateContent"
 }
 
 type ProviderConfig struct {
@@ -130,6 +141,16 @@ func (p *ProviderConfig) GetChatURL(fmt string) string {
 	for _, ep := range p.APIs {
 		if ep.APIFormat == fmt {
 			return ep.ChatURL()
+		}
+	}
+	return ""
+}
+
+// GetBaseURL returns the raw base_url for the given api_format, or empty string.
+func (p *ProviderConfig) GetBaseURL(fmt string) string {
+	for _, ep := range p.APIs {
+		if ep.APIFormat == fmt {
+			return ep.BaseURL
 		}
 	}
 	return ""

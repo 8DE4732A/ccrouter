@@ -172,6 +172,10 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 			jsonError(w, 502, fmt.Sprintf("provider %q has no usable endpoint for request format %q", providerName, apiFormat), "proxy_error")
 			return
 		}
+		// Gemini URLs embed the model name: {base}/models/{model}:generateContent
+		if upstreamFmt == "gemini" {
+			targetURL = config.GeminiChatURL(providerCfg.GetBaseURL("gemini"), model, isStream)
+		}
 
 		// Translate request body when the resolved upstream format differs from the client format.
 		clientBody := rewriteModel(body, model)
@@ -180,6 +184,11 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		if upstreamFmt != apiFormat {
 			upstreamBody = translate.TranslateRequest(apiFormat, upstreamFmt, model, clientBody, isStream)
 			translationTag = apiFormat + "→" + upstreamFmt
+		}
+
+		// For Gemini, strip "model" from body (it's encoded in the URL, not the body).
+		if upstreamFmt == "gemini" {
+			upstreamBody = stripModelField(upstreamBody)
 		}
 
 		attemptedKeys := map[string]bool{}
@@ -263,7 +272,12 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *k
 	originalClientBody []byte,
 	clientCtx, upstreamCtx map[string]any) (bool, *config.HealthCheckRule) {
 
-	req, err := http.NewRequest("POST", targetURL, bytes.NewReader(body))
+	// Gemini authenticates via ?key= query param instead of Authorization header.
+	upstreamURL := targetURL
+	if upstreamAPIFormat == "gemini" {
+		upstreamURL = appendGeminiKey(targetURL, key)
+	}
+	req, err := http.NewRequest("POST", upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		jsonError(w, 500, fmt.Sprintf("failed to build upstream request: %v", err), "proxy_error")
 		return true, nil
@@ -476,16 +490,46 @@ func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http
 	}
 
 	// Set upstream auth header in the format the upstream API expects.
-	// Anthropic endpoints use "x-api-key"; all others use "Authorization: Bearer".
-	if upstreamAPIFormat == "anthropic" {
+	// Anthropic endpoints use "x-api-key"; Gemini uses ?key= query param (set on URL, not here);
+	// all others use "Authorization: Bearer".
+	switch upstreamAPIFormat {
+	case "anthropic":
 		h.Set("X-Api-Key", apiKey)
-	} else {
+	case "gemini":
+		// Auth is added as ?key= query param in buildGeminiURL, not as a header.
+	default:
 		h.Set("Authorization", "Bearer "+apiKey)
 	}
 
 	h.Del("Host")
 	h.Del("Content-Length")
 	return h
+}
+
+// appendGeminiKey appends the ?key= (or &key=) query parameter to a Gemini URL.
+func appendGeminiKey(rawURL, apiKey string) string {
+	if apiKey == "" {
+		return rawURL
+	}
+	if strings.Contains(rawURL, "?") {
+		return rawURL + "&key=" + apiKey
+	}
+	return rawURL + "?key=" + apiKey
+}
+
+// stripModelField removes the "model" key from a JSON body.
+// Gemini encodes the model in the URL, not the request body.
+func stripModelField(body []byte) []byte {
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+	delete(data, "model")
+	out, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 func extractErrorText(body []byte) string {

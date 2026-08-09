@@ -24,7 +24,11 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 	originalClientBody []byte,
 	clientCtx, upstreamCtx map[string]any) (bool, *config.HealthCheckRule) {
 
-	req, err := http.NewRequestWithContext(r.Context(), "POST", targetURL, bytes.NewReader(body))
+	upstreamURL := targetURL
+	if upstreamAPIFormat == "gemini" {
+		upstreamURL = appendGeminiKey(targetURL, key)
+	}
+	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		jsonError(w, 500, "failed to build upstream request", "proxy_error")
 		return true, nil

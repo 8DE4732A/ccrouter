@@ -11,6 +11,26 @@ func extractUsage(body []byte, apiFormat string) map[string]any {
 	if err := json.Unmarshal(body, &data); err != nil {
 		return map[string]any{}
 	}
+
+	// Gemini uses "usageMetadata" with different field names.
+	if apiFormat == "gemini" {
+		u, _ := data["usageMetadata"].(map[string]any)
+		if u == nil {
+			return map[string]any{}
+		}
+		inp := keep(u["promptTokenCount"])
+		out := keep(u["candidatesTokenCount"])
+		total := keep(u["totalTokenCount"])
+		cached := keep(u["cachedContentTokenCount"])
+		return map[string]any{
+			"prompt_tokens":      inp,
+			"completion_tokens":  out,
+			"total_tokens":       total,
+			"cache_read_tokens":  cached,
+			"cache_write_tokens": nil,
+		}
+	}
+
 	u, _ := data["usage"].(map[string]any)
 	if u == nil {
 		return map[string]any{}
@@ -105,7 +125,16 @@ func sniffUsageChunk(chunk []byte, apiFormat string, holder *usageHolder) {
 			continue
 		}
 
-		if apiFormat == "anthropic" {
+		if apiFormat == "gemini" {
+			// Gemini SSE chunks contain "usageMetadata" in the final chunk.
+			u, _ := event["usageMetadata"].(map[string]any)
+			if u != nil {
+				holder.usage["prompt_tokens"] = keep(u["promptTokenCount"])
+				holder.usage["completion_tokens"] = keep(u["candidatesTokenCount"])
+				holder.usage["total_tokens"] = keep(u["totalTokenCount"])
+				holder.usage["cache_read_tokens"] = keep(u["cachedContentTokenCount"])
+			}
+		} else if apiFormat == "anthropic" {
 			if event["type"] == "message_start" {
 				m, _ := event["message"].(map[string]any)
 				u, _ := m["usage"].(map[string]any)
