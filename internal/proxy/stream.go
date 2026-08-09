@@ -31,7 +31,7 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 	}
 	req.Header = headers
 
-	resp, err := s.Client.Do(req)
+	resp, err := s.clientFor(providerName).Do(req)
 	if err != nil {
 		return s.networkError(w, t0, err, km, providerName, model, true, combo, key, clientAPIFormat, matchedPayload), nil
 	}
@@ -65,7 +65,8 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 
 		if httpOK {
 			km.RecordSuccess(key, model)
-			s.record(combo, providerName, model, key, clientAPIFormat, true, &statusCode, true, "", map[string]any{}, t0, nil, &matchedPayload)
+			usage := extractUsage(respBody, upstreamAPIFormat)
+			s.record(combo, providerName, model, key, clientAPIFormat, true, &statusCode, true, "", usage, t0, nil, &matchedPayload)
 		} else {
 			errText := extractErrorText(respBody)
 			s.record(combo, providerName, model, key, clientAPIFormat, true, &statusCode, false, "", map[string]any{}, t0, &errText, &matchedPayload)
@@ -167,7 +168,7 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 	// Write buffered first frame, then stream the rest.
 	holder := newUsageHolder()
 	if len(first) > 0 {
-		sniffUsageChunk(first, clientAPIFormat, holder)
+		sniffUsageChunk(first, upstreamAPIFormat, holder)
 		if !writeChunk(first) {
 			resp.Body.Close()
 			s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
@@ -183,7 +184,7 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 	for {
 		n, rerr := reader.Read(streamBuf)
 		if n > 0 {
-			sniffUsageChunk(streamBuf[:n], clientAPIFormat, holder)
+			sniffUsageChunk(streamBuf[:n], upstreamAPIFormat, holder)
 			if !writeChunk(streamBuf[:n]) {
 				resp.Body.Close()
 				s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)

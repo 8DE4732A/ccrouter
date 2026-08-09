@@ -45,13 +45,13 @@ var responseHeadersToIgnore = func() map[string]bool {
 
 // Service is the core proxy with two-level retry: combo member selection + key rotation.
 type Service struct {
-	Config      *config.AppConfig
-	KeyManagers map[string]*keys.Manager
-	Router      *combos.Router
-	Client      *http.Client
-	Recorder    *db.Recorder
-	Report      *report.Logger
-	verbose     bool
+	Config          *config.AppConfig
+	KeyManagers     map[string]*keys.Manager
+	Router          *combos.Router
+	ProviderClients map[string]*http.Client // per-provider http.Client
+	Recorder        *db.Recorder
+	Report          *report.Logger
+	verbose         bool
 
 	providers      map[string]*config.ProviderConfig
 	providerRules  map[string][]compiledRule
@@ -71,17 +71,17 @@ type compiledRule struct {
 
 // New builds a Service from config and managers.
 func New(cfg *config.AppConfig, kms map[string]*keys.Manager, router *combos.Router,
-	client *http.Client, rec *db.Recorder, rl *report.Logger) (*Service, error) {
+	providerClients map[string]*http.Client, rec *db.Recorder, rl *report.Logger) (*Service, error) {
 	s := &Service{
-		Config:        cfg,
-		KeyManagers:   kms,
-		Router:        router,
-		Client:        client,
-		Recorder:      rec,
-		Report:        rl,
-		verbose:       cfg.VerboseLogging,
-		providers:     make(map[string]*config.ProviderConfig),
-		providerRules: make(map[string][]compiledRule),
+		Config:          cfg,
+		KeyManagers:     kms,
+		Router:          router,
+		ProviderClients: providerClients,
+		Recorder:        rec,
+		Report:          rl,
+		verbose:         cfg.VerboseLogging,
+		providers:       make(map[string]*config.ProviderConfig),
+		providerRules:   make(map[string][]compiledRule),
 	}
 
 	// Compile payload scripts at startup — fail fast on syntax errors.
@@ -270,7 +270,8 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *k
 	}
 	req.Header = headers
 
-	resp, err := s.Client.Do(req)
+	client := s.clientFor(providerName)
+	resp, err := client.Do(req)
 	if err != nil {
 		return s.networkError(w, t0, err, km, providerName, model, false, combo, key, clientAPIFormat, matchedPayload), nil
 	}
@@ -285,6 +286,17 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *k
 	statusCode := resp.StatusCode
 	httpOK := statusCode < 400
 
+	// Extract usage from the original upstream response before any translation.
+	// The translator does not carry usage fields across formats, so we must
+	// read from the native response body using the upstream format.
+	var usage map[string]any
+	if httpOK {
+		usage = extractUsage(respBody, upstreamAPIFormat)
+		km.RecordSuccess(key, model)
+	} else {
+		usage = map[string]any{}
+	}
+
 	// Back-translate response when formats differ (upstream → client).
 	outBody := respBody
 	if httpOK && upstreamAPIFormat != clientAPIFormat {
@@ -295,14 +307,6 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *k
 		); len(translated) > 0 {
 			outBody = translated
 		}
-	}
-
-	var usage map[string]any
-	if httpOK {
-		usage = extractUsage(outBody, clientAPIFormat)
-		km.RecordSuccess(key, model)
-	} else {
-		usage = map[string]any{}
 	}
 	var errText *string
 	if !httpOK {
@@ -456,6 +460,12 @@ func buildHeaders(r *http.Request, apiKey string) http.Header {
 		if hopByHopHeaders[kl] {
 			continue
 		}
+		// Remove Accept-Encoding: let Go's http.Client handle compression negotiation
+		// and transparent decompression. If we forward the client's Accept-Encoding,
+		// the upstream may return gzip/br and Go won't auto-decompress it.
+		if kl == "accept-encoding" {
+			continue
+		}
 		for _, v := range vs {
 			h.Add(k, v)
 		}
@@ -600,4 +610,12 @@ func joinTags(tags ...string) string {
 		}
 	}
 	return strings.Join(parts, ", ")
+}
+
+// clientFor returns the per-provider http.Client, falling back to a default.
+func (s *Service) clientFor(providerName string) *http.Client {
+	if c, ok := s.ProviderClients[providerName]; ok {
+		return c
+	}
+	return http.DefaultClient
 }

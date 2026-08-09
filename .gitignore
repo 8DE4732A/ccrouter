@@ -1,5 +1,6 @@
 # Build artifacts
 /ccrouter
+/ccrouter-linux-arm64
 /tmp/
 *.test
 

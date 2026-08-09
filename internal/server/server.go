@@ -30,8 +30,11 @@ func Router(state *gateway.State) *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery())
 
+	// Auth middleware: if general.api_keys is set, require Bearer token.
+	authMW := apiKeyAuth(state)
+
 	// ---- Proxy endpoints ----
-	proxyGroup := r.Group("/")
+	proxyGroup := r.Group("/", authMW)
 	{
 		proxyGroup.POST("/v1/chat/completions", func(c *gin.Context) {
 			state.Service().Handle(c.Writer, c.Request, "openai", false)
@@ -66,6 +69,7 @@ func Router(state *gateway.State) *gin.Engine {
 		admin.GET("/info", adminInfo)
 		admin.GET("/health", adminHealth)
 		admin.GET("/logs", listLogs)
+		admin.GET("/logs/detail/:ts", getLogDetail)
 		admin.GET("/logs/settings", getLogSettings)
 		admin.PUT("/logs/settings", putLogSettings)
 	}
@@ -87,6 +91,33 @@ func Router(state *gateway.State) *gin.Engine {
 	})
 
 	return r
+}
+
+// apiKeyAuth returns a middleware that validates the Bearer token against
+// general.api_keys. If no api_keys are configured, all requests are allowed.
+func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		svc := state.Service()
+		keys := svc.Config.General.APIKeys
+		if len(keys) == 0 {
+			c.Next()
+			return
+		}
+		auth := c.GetHeader("Authorization")
+		const prefix = "Bearer "
+		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid Authorization header", "type": "auth_error"})
+			return
+		}
+		token := auth[len(prefix):]
+		for _, k := range keys {
+			if k.Key == token {
+				c.Next()
+				return
+			}
+		}
+		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API key", "type": "auth_error"})
+	}
 }
 
 func hasPrefix(s, prefix string) bool {

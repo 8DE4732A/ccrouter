@@ -5,6 +5,30 @@ import (
 	"strings"
 )
 
+// ProxyConfig configures a network proxy for outbound upstream requests.
+// URL supports http://, https://, and socks5:// schemes.
+// Disabled can be set on a provider to opt out of the global proxy.
+type ProxyConfig struct {
+	URL      string `json:"url,omitempty" yaml:"url,omitempty"`
+	Disabled bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+}
+
+// APIKeyEntry is a global API key that clients can use to authenticate with ccrouter.
+type APIKeyEntry struct {
+	Key string `json:"key" yaml:"key"`
+}
+
+// GeneralConfig holds global settings that apply across all providers.
+type GeneralConfig struct {
+	// APIKeys are the keys clients must supply in the Authorization header
+	// (Bearer <key>) to reach any proxy endpoint. If empty, no auth is required.
+	APIKeys []APIKeyEntry `json:"api_keys,omitempty" yaml:"api_keys,omitempty"`
+
+	// Proxy is the global outbound proxy used for all upstream requests unless
+	// a provider overrides it with its own proxy setting.
+	Proxy *ProxyConfig `json:"proxy,omitempty" yaml:"proxy,omitempty"`
+}
+
 // validClientFormats are formats the proxy exposes to clients (server routes exist for each).
 var validClientFormats = map[string]bool{
 	"openai":           true,
@@ -86,6 +110,9 @@ type ProviderConfig struct {
 	KeyStrategy      string            `json:"key_strategy" yaml:"key_strategy"`
 	Keys             []KeyConfig       `json:"keys" yaml:"keys"`
 	HealthCheckRules []HealthCheckRule `json:"health_check_rules" yaml:"health_check_rules"`
+	// Proxy overrides the global proxy for this provider.
+	// Set disabled: true to bypass the global proxy for this provider.
+	Proxy *ProxyConfig `json:"proxy,omitempty" yaml:"proxy,omitempty"`
 }
 
 // SupportsFormat reports whether the provider has an endpoint for api_format.
@@ -155,6 +182,7 @@ type PayloadScript struct {
 }
 
 type AppConfig struct {
+	General        GeneralConfig    `json:"general,omitempty" yaml:"general,omitempty"`
 	Providers      []ProviderConfig `json:"providers" yaml:"providers"`
 	Combos         []ComboConfig    `json:"combos" yaml:"combos"`
 	VerboseLogging bool             `json:"verbose_logging" yaml:"verbose_logging"`

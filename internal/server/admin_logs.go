@@ -28,6 +28,25 @@ func listLogs(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+func getLogDetail(c *gin.Context) {
+	tsStr := c.Param("ts")
+	ts, err := strconv.ParseFloat(tsStr, 64)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid ts: must be a float64 unix timestamp"})
+		return
+	}
+	rec, err := stateOf(c).Report().ReadOne(ts)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if rec == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "record not found"})
+		return
+	}
+	c.JSON(http.StatusOK, rec)
+}
+
 func getLogSettings(c *gin.Context) {
 	svc := stateOf(c).Service()
 	c.JSON(http.StatusOK, gin.H{"verbose_logging": svc.Config.VerboseLogging})

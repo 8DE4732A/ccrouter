@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { getConfig, putConfig, FMT_ENDPOINT, FMT_COLOR, normalizeFormats } from '../api/client'
 import type {
   AppConfig, ProviderConfig, ComboConfig, HealthCheckRule, ComboMember, ApiEndpoint, ApiFormat,
-  PayloadScript,
+  PayloadScript, GeneralConfig, ProxyConfig,
 } from '../api/client'
 
 // Client-facing formats (proxy routes exist for these).
@@ -19,6 +19,7 @@ const EMPTY_PROVIDER = (): ProviderConfig => ({
   name: '', api: [EMPTY_ENDPOINT()], max_retries: 3,
   key_strategy: 'fill-first', keys: [{ key: '' }], health_check_rules: [],
 })
+const EMPTY_GENERAL = (): GeneralConfig => ({ api_keys: [], proxy: undefined })
 const EMPTY_COMBO = (): ComboConfig => ({
   name: '', api_format: ['openai'], strategy: 'fill-first',
   members: [{ provider: '', model: '' }], aliases: [],
@@ -285,6 +286,17 @@ function ProviderDetail({
           </button>
         </div>
       </div>
+
+      {/* Per-provider proxy */}
+      <div>
+        <SectionLabel>网络代理（Provider 级别）</SectionLabel>
+        <FieldRow label="代理策略" hint="优先级高于全局代理设置">
+          <ProviderProxyField
+            proxy={p.proxy}
+            onChange={proxy => onUpdate({ proxy })}
+          />
+        </FieldRow>
+      </div>
     </div>
   )
 }
@@ -434,13 +446,167 @@ function ComboDetail({
 }
 
 // ── Payload rule detail panel ────────────────────────────────────
+// ── General settings panel ───────────────────────────────────────
+function GeneralPanel({
+  general,
+  onUpdate,
+}: {
+  general: GeneralConfig
+  onUpdate: (patch: Partial<GeneralConfig>) => void
+}) {
+  const [revealedKeys, setRevealedKeys] = useState<Set<number>>(new Set())
+  const toggleReveal = (ki: number) =>
+    setRevealedKeys(prev => {
+      const next = new Set(prev)
+      next.has(ki) ? next.delete(ki) : next.add(ki)
+      return next
+    })
+
+  const apiKeys = general.api_keys ?? []
+  const proxy = general.proxy ?? {}
+
+  const updateProxy = (patch: Partial<ProxyConfig>) =>
+    onUpdate({ proxy: { ...proxy, ...patch } })
+
+  const proxyEnabled = !!(proxy.url || proxy.disabled !== undefined)
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 32, maxWidth: 720 }}>
+
+      {/* API Keys */}
+      <div>
+        <SectionLabel>API 密钥（客户端访问认证）</SectionLabel>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+          配置后客户端必须在请求头中携带 <code style={{ fontFamily: 'var(--font-mono)' }}>Authorization: Bearer &lt;key&gt;</code> 才能访问代理接口。
+          留空则不启用认证。
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {apiKeys.map((k, ki) => {
+            const isNew = k.key === ''
+            const revealed = isNew || revealedKeys.has(ki)
+            return (
+              <div key={ki} style={{
+                display: 'grid', gridTemplateColumns: '24px 1fr 32px 32px',
+                gap: 6, alignItems: 'center',
+                padding: '6px 10px',
+                background: 'var(--bg)',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius)',
+              }}>
+                <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--font-mono)', textAlign: 'right' }}>{ki + 1}</span>
+                <input
+                  type={revealed ? 'text' : 'password'}
+                  value={k.key}
+                  placeholder="sk-..."
+                  style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                  onChange={e => onUpdate({
+                    api_keys: apiKeys.map((kk, kj) => kj === ki ? { key: e.target.value } : kk),
+                  })}
+                />
+                <button className="btn-icon" title={revealed ? '隐藏' : '显示'}
+                  onClick={() => toggleReveal(ki)}
+                  style={{ color: revealed ? 'var(--accent)' : 'var(--text-3)' }}>
+                  <IconEye off={revealed} />
+                </button>
+                <button className="btn-icon"
+                  onClick={() => onUpdate({ api_keys: apiKeys.filter((_, kj) => kj !== ki) })}>
+                  <IconTrash />
+                </button>
+              </div>
+            )
+          })}
+          <button className="btn-add" onClick={() => onUpdate({ api_keys: [...apiKeys, { key: '' }] })}>
+            <IconPlus /> 添加密钥
+          </button>
+        </div>
+      </div>
+
+      {/* Global Proxy */}
+      <div>
+        <SectionLabel>网络代理（全局出站代理）</SectionLabel>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+          所有 Provider 默认走此代理。支持 <code style={{ fontFamily: 'var(--font-mono)' }}>http://</code>、
+          <code style={{ fontFamily: 'var(--font-mono)' }}>https://</code>、
+          <code style={{ fontFamily: 'var(--font-mono)' }}>socks5://</code> 格式。
+          各 Provider 可单独覆盖（使用自己的代理或禁用代理）。
+        </div>
+        <FieldRow label="代理地址" hint="留空则不走代理">
+          <input
+            value={proxy.url ?? ''}
+            placeholder="socks5://127.0.0.1:7890 或 http://127.0.0.1:8080"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+            onChange={e => {
+              const val = e.target.value.trim()
+              updateProxy({ url: val || undefined, disabled: undefined })
+            }}
+          />
+        </FieldRow>
+        {proxyEnabled && (
+          <div style={{ marginTop: 4, fontSize: 12, color: proxy.url ? 'var(--ok-fg)' : 'var(--text-3)' }}>
+            {proxy.url ? `✓ 全局代理已设置` : '代理地址为空，全局代理未启用'}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Per-provider proxy field ──────────────────────────────────────
+function ProviderProxyField({
+  proxy,
+  onChange,
+}: {
+  proxy: ProxyConfig | undefined
+  onChange: (p: ProxyConfig | undefined) => void
+}) {
+  const mode = proxy?.disabled ? 'disabled' : proxy?.url ? 'custom' : 'inherit'
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ display: 'flex', gap: 6 }}>
+        {([
+          ['inherit', '跟随全局'] as const,
+          ['custom', '自定义代理'] as const,
+          ['disabled', '不走代理'] as const,
+        ]).map(([val, label]) => (
+          <label key={val} style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            padding: '5px 10px', borderRadius: 5, cursor: 'pointer',
+            border: `1px solid ${mode === val ? 'var(--accent)' : 'var(--border-md)'}`,
+            background: mode === val ? 'var(--accent-light)' : 'var(--bg-input)',
+            fontSize: 12, fontWeight: mode === val ? 600 : 400, userSelect: 'none',
+          }}>
+            <input type="radio" name="proxy-mode" checked={mode === val} onChange={() => {
+              if (val === 'inherit') onChange(undefined)
+              else if (val === 'disabled') onChange({ disabled: true })
+              else onChange({ url: '' })
+            }} style={{ display: 'none' }} />
+            {label}
+          </label>
+        ))}
+      </div>
+      {mode === 'custom' && (
+        <input
+          value={proxy?.url ?? ''}
+          placeholder="socks5://127.0.0.1:7890 或 http://127.0.0.1:8080"
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+          onChange={e => onChange({ url: e.target.value || undefined })}
+        />
+      )}
+      {mode === 'disabled' && (
+        <div style={{ fontSize: 12, color: 'var(--warn-fg)' }}>此 Provider 的请求不走任何代理</div>
+      )}
+    </div>
+  )
+}
+
 // ── Main ─────────────────────────────────────────────────────────
 export default function ConfigEditor() {
   const [cfg, setCfg] = useState<AppConfig | null>(null)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
-  const [tab, setTab] = useState<'providers' | 'combos' | 'payload'>('providers')
+  const [tab, setTab] = useState<'general' | 'providers' | 'combos' | 'payload'>('general')
   const [selProvider, setSelProvider] = useState(0)
   const [selCombo, setSelCombo] = useState(0)
   const [selPayload, setSelPayload] = useState(0)
@@ -449,6 +615,11 @@ export default function ConfigEditor() {
     getConfig()
       .then(raw => setCfg({
         ...raw,
+        general: {
+          ...EMPTY_GENERAL(),
+          ...raw.general,
+          api_keys: raw.general?.api_keys ?? [],
+        },
         combos: raw.combos.map(c => ({
           aliases: [],
           ...c,
@@ -469,8 +640,22 @@ export default function ConfigEditor() {
   const save = async () => {
     setSaving(true); setMsg(''); setErr('')
     try {
+      // Clean up general: strip empty api_keys, strip proxy if no url and not disabled
+      const general = cfg.general ?? {}
+      const cleanGeneral: typeof general = {
+        ...general,
+        api_keys: (general.api_keys ?? []).filter(k => k.key.trim() !== ''),
+      }
+      if (!cleanGeneral.proxy?.url && !cleanGeneral.proxy?.disabled) {
+        delete cleanGeneral.proxy
+      }
+      if ((cleanGeneral.api_keys ?? []).length === 0) {
+        delete cleanGeneral.api_keys
+      }
+
       await putConfig({
         ...cfg,
+        general: cleanGeneral,
         combos: cfg.combos.map(c => ({
           ...c,
           api_format: (c.api_format as ApiFormat[]).length === 1
@@ -482,11 +667,22 @@ export default function ConfigEditor() {
             return mm
           }),
         })),
+        providers: cfg.providers.map(p => {
+          const pp = { ...p }
+          // Clean up per-provider proxy
+          if (!pp.proxy?.url && !pp.proxy?.disabled) {
+            delete pp.proxy
+          }
+          return pp
+        }),
       })
       setMsg('配置已保存并热重载')
     } catch (e: unknown) { setErr(String(e)) }
     setSaving(false)
   }
+
+  const updateGeneral = (patch: Partial<GeneralConfig>) =>
+    setCfg(c => c ? { ...c, general: { ...(c.general ?? {}), ...patch } } : c)
 
   const updateProvider = (i: number, patch: Partial<ProviderConfig>) =>
     setCfg(c => c ? { ...c, providers: c.providers.map((p, j) => j === i ? { ...p, ...patch } : p) } : c)
@@ -556,9 +752,10 @@ export default function ConfigEditor() {
 
       {/* Tab bar */}
       <div style={{ display: 'flex', gap: 2, marginBottom: 16, background: 'var(--bg)', padding: 4, borderRadius: 8, border: '1px solid var(--border)', width: 'fit-content' }}>
-        {(['providers', 'combos', 'payload'] as const).map(t => {
-          const count = t === 'providers' ? cfg.providers.length : t === 'combos' ? cfg.combos.length : payloadScripts.length
+        {(['general', 'providers', 'combos', 'payload'] as const).map(t => {
+          const count = t === 'providers' ? cfg.providers.length : t === 'combos' ? cfg.combos.length : t === 'payload' ? payloadScripts.length : null
           const active = tab === t
+          const label = t === 'general' ? '通用' : t === 'providers' ? 'Providers' : t === 'combos' ? 'Combos' : 'Payload 脚本'
           return (
             <button key={t} onClick={() => setTab(t)} style={{
               padding: '6px 16px',
@@ -573,13 +770,15 @@ export default function ConfigEditor() {
               transition: 'all 0.12s',
               display: 'flex', alignItems: 'center', gap: 6,
             }}>
-              {t === 'providers' ? 'Providers' : t === 'combos' ? 'Combos' : 'Payload 脚本'}
-              <span style={{
-                fontSize: 11, padding: '1px 6px', borderRadius: 10,
-                background: active ? 'var(--accent-light)' : 'var(--bg-code)',
-                color: active ? 'var(--accent)' : 'var(--text-3)',
-                fontWeight: 500,
-              }}>{count}</span>
+              {label}
+              {count !== null && (
+                <span style={{
+                  fontSize: 11, padding: '1px 6px', borderRadius: 10,
+                  background: active ? 'var(--accent-light)' : 'var(--bg-code)',
+                  color: active ? 'var(--accent)' : 'var(--text-3)',
+                  fontWeight: 500,
+                }}>{count}</span>
+              )}
             </button>
           )
         })}
@@ -588,7 +787,18 @@ export default function ConfigEditor() {
       {/* Master-detail layout */}
       <div style={{ display: 'flex', gap: 0, flex: 1, background: 'var(--bg-panel)', border: '1px solid var(--border)', borderRadius: 10, overflow: 'hidden', boxShadow: '0 1px 3px rgba(0,0,0,0.08)' }}>
 
-        {/* ── List panel ── */}
+        {/* 通用 tab: full-width panel, no sidebar */}
+        {tab === 'general' && (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px' }}>
+            <GeneralPanel
+              general={cfg.general ?? {}}
+              onUpdate={updateGeneral}
+            />
+          </div>
+        )}
+
+        {/* ── List panel (providers / combos / payload) ── */}
+        {tab !== 'general' && (<>
         <div style={{ width: 220, minWidth: 220, borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
           <div style={{ padding: '10px 12px 8px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-3)', flex: 1 }}>
@@ -862,6 +1072,7 @@ combo == "deepseek-v4-flash" && "thinking" in body && body.thinking.type == "ada
             )
           )}
         </div>
+        </>)} {/* end tab !== 'general' */}
       </div>
     </div>
   )

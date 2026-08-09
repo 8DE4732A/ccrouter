@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { getLogs, getLogSettings, putLogSettings } from '../api/client'
-import type { LogRecord } from '../api/client'
+import { getLogs, getLogDetail, getLogSettings, putLogSettings } from '../api/client'
+import type { LogRow, LogRecord } from '../api/client'
 import { FMT_COLOR } from '../api/client'
 
 const PAGE_SIZE = 20
 
 export default function Logs() {
-  const [rows, setRows] = useState<LogRecord[]>([])
+  const [rows, setRows] = useState<LogRow[]>([])
   const [hasMore, setHasMore] = useState(false)
   const [page, setPage] = useState(0)
   const [successFilter, setSuccessFilter] = useState<'' | 'true' | 'false'>('')
@@ -14,9 +14,10 @@ export default function Logs() {
 
   const [verbose, setVerbose] = useState(false)
   const [settingsErr, setSettingsErr] = useState('')
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null)
 
-  // Load verbose_logging setting on mount
+  // expandedTs → null (loading) | LogRecord (loaded) | string (error)
+  const [expanded, setExpanded] = useState<Map<number, LogRecord | null | string>>(new Map())
+
   useEffect(() => {
     getLogSettings()
       .then(s => setVerbose(s.verbose_logging))
@@ -24,6 +25,7 @@ export default function Logs() {
   }, [])
 
   const load = async () => {
+    setErr('')
     try {
       const res = await getLogs({
         limit: PAGE_SIZE,
@@ -32,6 +34,7 @@ export default function Logs() {
       })
       setRows(res.items)
       setHasMore(res.has_more)
+      setExpanded(new Map()) // reset expanded state on new page
     } catch (e: unknown) { setErr(String(e)) }
   }
 
@@ -47,37 +50,54 @@ export default function Logs() {
     }
   }
 
-  const toggleRow = (i: number) => {
-    setExpandedIdx(prev => prev === i ? null : i)
+  const toggleRow = async (ts: number) => {
+    setExpanded(prev => {
+      const next = new Map(prev)
+      if (next.has(ts)) {
+        next.delete(ts) // collapse
+        return next
+      }
+      next.set(ts, null) // mark as loading
+      return next
+    })
+
+    // If not already loaded, fetch detail
+    if (!expanded.has(ts)) {
+      try {
+        const detail = await getLogDetail(ts)
+        setExpanded(prev => {
+          const next = new Map(prev)
+          next.set(ts, detail)
+          return next
+        })
+      } catch (e: unknown) {
+        setExpanded(prev => {
+          const next = new Map(prev)
+          next.set(ts, String(e))
+          return next
+        })
+      }
+    }
   }
 
   return (
     <div className="page">
       <div className="page-header">
         <span className="page-title">日志</span>
-        <span className="page-sub">完整请求报文记录</span>
+        <span className="page-sub">完整请求报文记录（点击行展开明细）</span>
       </div>
 
       {/* Verbose toggle */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-        <label
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 8,
-            padding: '6px 12px',
-            border: `1px solid ${verbose ? 'var(--accent)' : 'var(--border-md)'}`,
-            borderRadius: 6,
-            background: verbose ? 'var(--accent-light)' : 'var(--bg-input)',
-            cursor: 'pointer',
-            userSelect: 'none',
-          }}
-        >
-          <input
-            type="checkbox"
-            checked={verbose}
-            onChange={e => toggleVerbose(e.target.checked)}
-          />
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: 8,
+          padding: '6px 12px',
+          border: `1px solid ${verbose ? 'var(--accent)' : 'var(--border-md)'}`,
+          borderRadius: 6,
+          background: verbose ? 'var(--accent-light)' : 'var(--bg-input)',
+          cursor: 'pointer', userSelect: 'none',
+        }}>
+          <input type="checkbox" checked={verbose} onChange={e => toggleVerbose(e.target.checked)} />
           <span style={{ fontWeight: 600, fontSize: 13 }}>详细记录</span>
         </label>
         <span style={{ fontSize: 12, color: 'var(--warn-fg)', display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -123,50 +143,58 @@ export default function Logs() {
                 </td>
               </tr>
             )}
-            {rows.map((r, i) => (
-              <>
-                <tr
-                  key={i}
-                  className={r.success ? '' : 'row-err'}
-                  style={{ cursor: 'pointer' }}
-                  onClick={() => toggleRow(i)}
-                >
-                  <td className="text-muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
-                    {new Date(r.ts * 1000).toLocaleString('zh-CN')}
-                  </td>
-                  <td><code>{r.combo ?? '—'}</code></td>
-                  <td style={{ fontSize: 12 }}>
-                    {r.provider ?? '—'} › {r.model ?? '—'}
-                  </td>
-                  <td>
-                    {r.api_format && (
-                      <span className={`tag ${(FMT_COLOR as Record<string, string>)[r.api_format] ?? 'amber'}`}>
-                        {r.api_format}
-                      </span>
-                    )}
-                  </td>
-                  <td style={{ color: r.is_stream ? 'var(--ok-fg)' : 'var(--text-3)' }}>
-                    {r.is_stream ? '✓' : '—'}
-                  </td>
-                  <td>
-                    {r.success
-                      ? <span className="badge ok">{r.status_code}</span>
-                      : <span className="badge err">{r.status_code ?? 'ERR'}</span>}
-                  </td>
-                  <td className="text-muted">{r.duration_ms != null ? r.duration_ms + ' ms' : '—'}</td>
-                  <td style={{ color: 'var(--text-3)', fontSize: 12 }}>
-                    {expandedIdx === i ? '▲' : '▼'}
-                  </td>
-                </tr>
-                {expandedIdx === i && (
-                  <tr key={`${i}-detail`}>
-                    <td colSpan={8} style={{ padding: 0 }}>
-                      <LogDetail record={r} />
+            {rows.map((r, i) => {
+              const detail = expanded.get(r.ts)
+              const isOpen = expanded.has(r.ts)
+              const isLoading = detail === null
+              return (
+                <>
+                  <tr
+                    key={i}
+                    className={r.success ? '' : 'row-err'}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => toggleRow(r.ts)}
+                  >
+                    <td className="text-muted" style={{ fontSize: 12, whiteSpace: 'nowrap' }}>
+                      {new Date(r.ts * 1000).toLocaleString('zh-CN')}
+                    </td>
+                    <td><code>{r.combo ?? '—'}</code></td>
+                    <td style={{ fontSize: 12 }}>{r.provider ?? '—'} › {r.model ?? '—'}</td>
+                    <td>
+                      {r.api_format && (
+                        <span className={`tag ${(FMT_COLOR as Record<string, string>)[r.api_format] ?? 'amber'}`}>
+                          {r.api_format}
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ color: r.is_stream ? 'var(--ok-fg)' : 'var(--text-3)' }}>
+                      {r.is_stream ? '✓' : '—'}
+                    </td>
+                    <td>
+                      {r.success
+                        ? <span className="badge ok">{r.status_code}</span>
+                        : <span className="badge err">{r.status_code ?? 'ERR'}</span>}
+                    </td>
+                    <td className="text-muted">{r.duration_ms != null ? r.duration_ms + ' ms' : '—'}</td>
+                    <td style={{ color: 'var(--text-3)', fontSize: 12 }}>
+                      {isLoading ? '…' : isOpen ? '▲' : '▼'}
                     </td>
                   </tr>
-                )}
-              </>
-            ))}
+                  {isOpen && (
+                    <tr key={`${i}-detail`}>
+                      <td colSpan={8} style={{ padding: 0 }}>
+                        {isLoading
+                          ? <div style={{ padding: '12px 16px', color: 'var(--text-3)', fontSize: 12 }}>加载中…</div>
+                          : typeof detail === 'string'
+                            ? <div style={{ padding: '12px 16px', color: 'var(--err-fg)', fontSize: 12 }}>{detail}</div>
+                            : <LogDetail record={detail as LogRecord} />
+                        }
+                      </td>
+                    </tr>
+                  )}
+                </>
+              )
+            })}
           </tbody>
         </table>
       </div>
@@ -197,27 +225,17 @@ function LogDetail({ record }: { record: LogRecord }) {
       {sections.map(([title, data]) => (
         <div key={title} style={{ marginBottom: 12 }}>
           <div style={{
-            fontSize: 11,
-            fontWeight: 600,
-            textTransform: 'uppercase',
-            letterSpacing: '0.06em',
-            color: 'var(--text-3)',
-            marginBottom: 4,
+            fontSize: 11, fontWeight: 600, textTransform: 'uppercase',
+            letterSpacing: '0.06em', color: 'var(--text-3)', marginBottom: 4,
           }}>
             {title}
           </div>
           <pre style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 12,
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
-            overflowY: 'auto',
-            maxHeight: 360,
-            background: 'var(--bg)',
-            border: '1px solid var(--border)',
-            borderRadius: 4,
-            padding: '8px 10px',
-            margin: 0,
+            fontFamily: 'var(--font-mono)', fontSize: 12,
+            whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+            overflowY: 'auto', maxHeight: 360,
+            background: 'var(--bg)', border: '1px solid var(--border)',
+            borderRadius: 4, padding: '8px 10px', margin: 0,
           }}>
             {JSON.stringify(data ?? null, null, 2)}
           </pre>

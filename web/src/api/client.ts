@@ -16,6 +16,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 // ---- Config ----
 
+export type ProxyConfig = {
+  url?: string
+  disabled?: boolean
+}
+
+export type APIKeyEntry = {
+  key: string
+}
+
+export type GeneralConfig = {
+  api_keys?: APIKeyEntry[]
+  proxy?: ProxyConfig
+}
+
 export type HealthCheckRule = {
   description: string
   jsonpath: string
@@ -40,6 +54,7 @@ export type ProviderConfig = {
   key_strategy: 'fill-first' | 'round-robin'
   keys: KeyConfig[]
   health_check_rules: HealthCheckRule[]
+  proxy?: ProxyConfig
 }
 
 export type ComboMember = {
@@ -85,6 +100,7 @@ export type PayloadScript = {
 }
 
 export type AppConfig = {
+  general?: GeneralConfig
   providers: ProviderConfig[]
   combos: ComboConfig[]
   payload_scripts?: PayloadScript[]
@@ -245,7 +261,9 @@ export const getAdminHealth = () => request<AdminHealth>('/health')
 
 // ---- Verbose Logs ----
 type LogHttpPart = { method?: string; path?: string; url?: string; headers: Record<string, string>; body: unknown }
-export type LogRecord = {
+
+// List row — no request/response body, just metadata
+export type LogRow = {
   ts: number
   combo: string | null
   provider: string | null
@@ -255,10 +273,15 @@ export type LogRecord = {
   status_code: number | null
   success: boolean
   duration_ms: number | null
+}
+
+// Full detail — includes request + response bodies, fetched on demand
+export type LogRecord = LogRow & {
   request: { client: LogHttpPart; upstream: LogHttpPart }
   response: { status_code: number | null; headers: Record<string, string>; body: unknown }
 }
-export type LogsResp = { items: LogRecord[]; has_more: boolean }
+
+export type LogsResp = { items: LogRow[]; has_more: boolean }
 export type LogSettings = { verbose_logging: boolean }
 
 export const getLogs = (params: { limit?: number; offset?: number; success?: boolean }) => {
@@ -266,6 +289,7 @@ export const getLogs = (params: { limit?: number; offset?: number; success?: boo
   Object.entries(params).forEach(([k, v]) => { if (v != null) qs.set(k, String(v)) })
   return request<LogsResp>(`/logs?${qs}`)
 }
+export const getLogDetail = (ts: number) => request<LogRecord>(`/logs/detail/${ts}`)
 export const getLogSettings = () => request<LogSettings>('/logs/settings')
 export const putLogSettings = (enabled: boolean) =>
   request<LogSettings>('/logs/settings', { method: 'PUT', body: JSON.stringify({ enabled }) })

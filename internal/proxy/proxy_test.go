@@ -50,7 +50,7 @@ func mustBuildService(t *testing.T, keysByProvider map[string][]string,
 	for name, ks := range keysByProvider {
 		kms[name] = keys.NewManager(name, ks, "fill-first")
 	}
-	svc, err := New(cfg, kms, combos.NewRouter(cfg.Combos), http.DefaultClient, nil, nil)
+	svc, err := New(cfg, kms, combos.NewRouter(cfg.Combos), map[string]*http.Client{}, nil, nil)
 	if err != nil {
 		t.Fatalf("build service: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestQuotaRuleWithModelFilterDoesNotAffectOtherModel(t *testing.T) {
 	kms := map[string]*keys.Manager{
 		"sn": keys.NewManager("sn", []string{"key-1"}, "fill-first"),
 	}
-	svc, err := New(cfg, kms, combos.NewRouter(cfg.Combos), http.DefaultClient, nil, nil)
+	svc, err := New(cfg, kms, combos.NewRouter(cfg.Combos), map[string]*http.Client{}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

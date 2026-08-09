@@ -174,7 +174,8 @@ func (l *Logger) DroppedCount() int {
 	return l.dropped
 }
 
-// Read returns up to limit records starting at offset, newest first.
+// Read returns up to limit metadata-only records starting at offset, newest first.
+// The request/response detail fields are stripped — use ReadOne to fetch a single full record.
 func (l *Logger) Read(limit, offset int, success *bool) (map[string]any, error) {
 	need := limit + 1
 	collected := []map[string]any{}
@@ -188,13 +189,35 @@ func (l *Logger) Read(limit, offset int, success *bool) (map[string]any, error) 
 			skipped++
 			continue
 		}
-		collected = append(collected, rec)
+		collected = append(collected, stripDetail(rec))
 		if len(collected) >= need {
 			break
 		}
 	}
 	hasMore := len(collected) > limit
 	return map[string]any{"items": collected[:min(limit, len(collected))], "has_more": hasMore}, nil
+}
+
+// ReadOne returns the single full record whose ts matches, or nil if not found.
+func (l *Logger) ReadOne(ts float64) (map[string]any, error) {
+	for rec := range l.iterFiles() {
+		if tsVal, ok := rec["ts"].(float64); ok && tsVal == ts {
+			return rec, nil
+		}
+	}
+	return nil, nil
+}
+
+// stripDetail removes the large request/response body fields for list views.
+func stripDetail(rec map[string]any) map[string]any {
+	out := make(map[string]any, len(rec))
+	for k, v := range rec {
+		if k == "request" || k == "response" {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func boolFrom(v any) bool {
