@@ -477,7 +477,9 @@ function GeneralPanel({
       <div>
         <SectionLabel>API 密钥（客户端访问认证）</SectionLabel>
         <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
-          配置后客户端必须在请求头中携带 <code style={{ fontFamily: 'var(--font-mono)' }}>Authorization: Bearer &lt;key&gt;</code> 才能访问代理接口。
+          配置后客户端必须携带以下任一请求头才能访问代理接口：
+          <code style={{ fontFamily: 'var(--font-mono)', margin: '0 4px' }}>Authorization: Bearer &lt;key&gt;</code>（OpenAI / 通用）
+          或 <code style={{ fontFamily: 'var(--font-mono)', margin: '0 4px' }}>X-Api-Key: &lt;key&gt;</code>（Anthropic SDK）。
           留空则不启用认证。
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
