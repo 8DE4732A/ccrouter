@@ -95,6 +95,8 @@ func Router(state *gateway.State) *gin.Engine {
 
 // apiKeyAuth returns a middleware that validates the Bearer token against
 // general.api_keys. If no api_keys are configured, all requests are allowed.
+// Accepts both "Authorization: Bearer <key>" (OpenAI style) and
+// "x-api-key: <key>" (Anthropic style).
 func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		svc := state.Service()
@@ -103,13 +105,24 @@ func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		auth := c.GetHeader("Authorization")
-		const prefix = "Bearer "
-		if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "missing or invalid Authorization header", "type": "auth_error"})
+
+		// Extract token — prefer x-api-key, fall back to Authorization: Bearer.
+		token := c.GetHeader("X-Api-Key")
+		if token == "" {
+			auth := c.GetHeader("Authorization")
+			const prefix = "Bearer "
+			if len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
+				token = auth[len(prefix):]
+			}
+		}
+
+		if token == "" {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error": "missing API key (send Authorization: Bearer <key> or X-Api-Key: <key>)",
+				"type":  "auth_error",
+			})
 			return
 		}
-		token := auth[len(prefix):]
 		for _, k := range keys {
 			if k.Key == token {
 				c.Next()

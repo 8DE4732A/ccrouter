@@ -192,7 +192,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 				break
 			}
 			attemptedKeys[key] = true
-			headers := buildHeaders(r, key)
+			headers := buildHeaders(r, key, upstreamFmt)
 
 			// Run enabled payload scripts in order (chained).
 			// Scripts operate on the upstream body (already translated).
@@ -453,7 +453,7 @@ func isStreamingRequest(r *http.Request, body []byte) bool {
 	return false
 }
 
-func buildHeaders(r *http.Request, apiKey string) http.Header {
+func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http.Header {
 	h := http.Header{}
 	for k, vs := range r.Header {
 		kl := strings.ToLower(k)
@@ -466,12 +466,23 @@ func buildHeaders(r *http.Request, apiKey string) http.Header {
 		if kl == "accept-encoding" {
 			continue
 		}
+		// Remove x-api-key / Authorization: we set the correct upstream auth below.
+		if kl == "x-api-key" || kl == "authorization" {
+			continue
+		}
 		for _, v := range vs {
 			h.Add(k, v)
 		}
 	}
-	h.Del("Authorization")
-	h.Set("Authorization", "Bearer "+apiKey)
+
+	// Set upstream auth header in the format the upstream API expects.
+	// Anthropic endpoints use "x-api-key"; all others use "Authorization: Bearer".
+	if upstreamAPIFormat == "anthropic" {
+		h.Set("X-Api-Key", apiKey)
+	} else {
+		h.Set("Authorization", "Bearer "+apiKey)
+	}
+
 	h.Del("Host")
 	h.Del("Content-Length")
 	return h
