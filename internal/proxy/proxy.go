@@ -19,6 +19,9 @@ import (
 	"ccrouter/internal/report"
 	"ccrouter/internal/script"
 	"ccrouter/internal/translate"
+
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // hopByHopHeaders are stripped from forwarded requests and responses.
@@ -185,6 +188,9 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 			upstreamBody = translate.TranslateRequest(apiFormat, upstreamFmt, model, clientBody, isStream)
 			translationTag = apiFormat + "→" + upstreamFmt
 		}
+		// Fix Anthropic vs OpenAI token budget mismatch: when translating claude→openai with
+		// thinking enabled, add budget_tokens to max_tokens so reasoning doesn't crowd out text.
+		upstreamBody = adjustMaxTokensForOpenAIReasoning(upstreamBody, clientBody, apiFormat, upstreamFmt)
 
 		// For Gemini, strip "model" from body (it's encoded in the URL, not the body).
 		// Also add includeThoughts:true when thinkingConfig is present so Gemini returns
@@ -731,6 +737,47 @@ func appendGeminiKey(rawURL, apiKey string) string {
 
 // stripModelField removes the "model" key from a JSON body.
 // Gemini encodes the model in the URL, not the request body.
+// adjustMaxTokensForOpenAIReasoning fixes a semantic mismatch between Anthropic and OpenAI
+// token budget models when translating claude→openai with thinking enabled:
+//
+//   - Anthropic: max_tokens = text output only; thinking.budget_tokens is a separate budget
+//   - OpenAI reasoning models: max_tokens = shared pool for reasoning + text output
+//
+// Without this adjustment, the upstream reasoning model can exhaust max_tokens entirely on
+// reasoning, leaving no tokens for actual text output (content="", finish_reason=length).
+// Claude Code then sees stop_reason=max_tokens with an empty response and retries endlessly.
+//
+// Fix: when clientFmt=="anthropic" and upstreamFmt=="openai", add budget_tokens to max_tokens
+// so the upstream has a combined budget that matches the client's intent.
+func adjustMaxTokensForOpenAIReasoning(upstreamBody, clientBody []byte, clientFmt, upstreamFmt string) []byte {
+	if clientFmt != "anthropic" || upstreamFmt != "openai" {
+		return upstreamBody
+	}
+
+	// Only act when thinking is enabled in the original client request.
+	thinkingType := gjson.GetBytes(clientBody, "thinking.type").String()
+	if thinkingType != "enabled" && thinkingType != "adaptive" && thinkingType != "auto" {
+		return upstreamBody
+	}
+
+	budgetTokens := gjson.GetBytes(clientBody, "thinking.budget_tokens").Int()
+	if budgetTokens <= 0 {
+		return upstreamBody
+	}
+
+	maxTokens := gjson.GetBytes(upstreamBody, "max_tokens").Int()
+	if maxTokens <= 0 {
+		return upstreamBody
+	}
+
+	combined := maxTokens + budgetTokens
+	out, err := sjson.SetBytes(upstreamBody, "max_tokens", combined)
+	if err != nil {
+		return upstreamBody
+	}
+	return out
+}
+
 func stripModelField(body []byte) []byte {
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
