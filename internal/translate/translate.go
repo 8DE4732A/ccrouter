@@ -15,10 +15,20 @@ import (
 )
 
 // ccrouter format name → CLIProxyAPI format name.
+//
+// CLIProxyAPI uses "codex" to represent the OpenAI Responses API (/v1/responses)
+// as an *upstream* format (i.e. the target the proxy sends requests to).
+// "openai-response" (no 's') is CLIProxyAPI's *entry* format for clients that
+// speak the Responses API — it is never used as an upstream target.
+//
+// Mapping table (ccrouter → CLIProxyAPI):
+//   openai           → openai           (chat/completions, same name)
+//   anthropic        → claude           (Anthropic Messages API)
+//   openai-responses → codex            (OpenAI Responses API as upstream)
+//   gemini           → gemini           (same name)
 var nameMap = map[string]string{
 	"anthropic":        "claude",
-	"openai-responses": "openai-response",
-	// others are identical (openai, gemini, …)
+	"openai-responses": "codex",
 }
 
 func toSDKFormat(f string) sdkt.Format {
