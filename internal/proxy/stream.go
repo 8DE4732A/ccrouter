@@ -136,62 +136,93 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 	var translateParam any
 	ctx := req.Context()
 
-	writeChunk := func(data []byte) bool {
-		if !needTranslate || len(data) == 0 {
-			_, werr := w.Write(data)
+	// writeFrame processes exactly one complete SSE frame.
+	//
+	// A frame is either:
+	//   - "data: {...}\n\n"                        (OpenAI / Gemini style)
+	//   - "event: foo\ndata: {...}\n\n"            (Anthropic style)
+	//
+	// When translation is needed, we extract the data: line from the frame
+	// regardless of whether an event: prefix is present, so that the translator
+	// always receives "data: <json>" as its input. This fixes the case where
+	// an Anthropic upstream returns event:-prefixed frames that were previously
+	// silently dropped because the translator checks for a "data:" prefix.
+	writeFrame := func(frame []byte) bool {
+		if !needTranslate || len(frame) == 0 {
+			_, werr := w.Write(frame)
 			if doAccumulate {
-				accumulator = append(accumulator, data...)
+				accumulator = append(accumulator, frame...)
 			}
 			return werr == nil
 		}
-		// Translate each complete SSE line individually.
-		for _, line := range splitSSELines(data) {
-			if len(line) == 0 {
+
+		// Extract the data: line from the frame.
+		// Handles both single-line "data: {...}" and multi-line "event: ...\ndata: {...}" formats.
+		dataLine := extractSSEDataLine(frame)
+		if dataLine == nil {
+			// No data: line (comment, keepalive, or event:-only frame) — pass through as-is.
+			_, werr := w.Write(frame)
+			if doAccumulate {
+				accumulator = append(accumulator, frame...)
+			}
+			return werr == nil
+		}
+
+		// Build the translation input: always "data: <json>" so translators can strip the prefix.
+		translationLine := dataLine
+		if upstreamAPIFormat == "openai" {
+			// Normalize non-standard reasoning field names (e.g. "reasoning" → "reasoning_content")
+			// before handing off to the translator.
+			normalized := normalizeOpenAIReasoningField(stripSSEPrefix(dataLine))
+			if !bytes.HasPrefix(normalized, []byte("data:")) {
+				normalized = append([]byte("data: "), normalized...)
+			}
+			translationLine = normalized
+		}
+
+		translated := translate.TranslateResponseStream(
+			ctx, clientAPIFormat, upstreamAPIFormat, model,
+			originalClientBody, body, translationLine, &translateParam,
+		)
+		for _, out := range translated {
+			if len(out) == 0 {
 				continue
 			}
-			// Normalize non-standard reasoning field variants before translation.
-			translationLine := line
-			if upstreamAPIFormat == "openai" {
-				translationLine = normalizeOpenAIReasoningField(stripSSEPrefix(line))
-				// Re-add data: prefix so the translator can strip it again.
-				if !bytes.HasPrefix(translationLine, []byte("data:")) {
-					translationLine = append([]byte("data: "), translationLine...)
-				}
+			// CLIProxyAPI translators may return either:
+			//   (a) a complete SSE frame: "event: ...\ndata: ...\n\n"
+			//   (b) bare JSON bytes (legacy path)
+			// Only wrap case (b) with "data: ...\n\n".
+			isSSEFrame := bytes.HasPrefix(out, []byte("data:")) || bytes.HasPrefix(out, []byte("event:"))
+			if !isSSEFrame {
+				out = append([]byte("data: "), append(out, '\n', '\n')...)
 			}
-			translated := translate.TranslateResponseStream(
-				ctx, clientAPIFormat, upstreamAPIFormat, model,
-				originalClientBody, body, translationLine, &translateParam,
-			)
-			for _, out := range translated {
-				if len(out) == 0 {
-					continue
-				}
-				// CLIProxyAPI translators may return either:
-				//   (a) a complete SSE frame: "event: ...\ndata: ...\n\n"
-				//   (b) bare JSON bytes (legacy path)
-				// Only wrap case (b) with "data: ...\n\n". A complete SSE frame
-				// already starts with "event:" or "data:" and must not be double-wrapped.
-				isSSEFrame := bytes.HasPrefix(out, []byte("data:")) || bytes.HasPrefix(out, []byte("event:"))
-				if !isSSEFrame {
-					out = append([]byte("data: "), append(out, '\n', '\n')...)
-				}
-				_, werr := w.Write(out)
-				if doAccumulate {
-					accumulator = append(accumulator, out...)
-				}
-				if werr != nil {
-					return false
-				}
+			_, werr := w.Write(out)
+			if doAccumulate {
+				accumulator = append(accumulator, out...)
+			}
+			if werr != nil {
+				return false
 			}
 		}
 		return true
 	}
 
-	// Write buffered first frame, then stream the rest.
+	// Write buffered first frame(s), then stream the rest.
 	holder := newUsageHolder()
+
+	// processFrames splits buffered data into complete SSE frames and processes each one.
+	// Used for the initial buffered first-frame data which may contain multiple frames.
+	processFrames := func(data []byte) bool {
+		for _, frame := range splitSSEFrames(data) {
+			sniffUsageChunk(frame, upstreamAPIFormat, holder)
+			if !writeFrame(frame) {
+				return false
+			}
+		}
+		return true
+	}
 	if len(first) > 0 {
-		sniffUsageChunk(first, upstreamAPIFormat, holder)
-		if !writeChunk(first) {
+		if !processFrames(first) {
 			resp.Body.Close()
 			s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
 			return true, nil
@@ -201,23 +232,25 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		}
 	}
 
-	// stream remaining body
-	streamBuf := make([]byte, 4096)
-	for {
-		n, rerr := reader.Read(streamBuf)
-		if n > 0 {
-			sniffUsageChunk(streamBuf[:n], upstreamAPIFormat, holder)
-			if !writeChunk(streamBuf[:n]) {
-				resp.Body.Close()
-				s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
-				return true, nil
-			}
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
+	// Stream remaining frames using a scanner that splits on SSE frame boundaries (\n\n).
+	// This ensures each Scan() token is exactly one complete SSE frame, preventing
+	// content loss when TCP packet boundaries fall inside an SSE frame.
+	scanner := bufio.NewScanner(reader)
+	scanner.Split(splitSSEFrame)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		frame := scanner.Bytes()
+		if len(bytes.TrimSpace(frame)) == 0 {
+			continue
 		}
-		if rerr != nil {
-			break
+		sniffUsageChunk(frame, upstreamAPIFormat, holder)
+		if !writeFrame(frame) {
+			resp.Body.Close()
+			s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
+			return true, nil
+		}
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
 		}
 	}
 	resp.Body.Close()
@@ -225,11 +258,30 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 	return true, nil
 }
 
-// splitSSELines splits a raw SSE byte chunk into individual "data: ...\n\n" lines
-// suitable for per-line translation. Empty sections between delimiters are skipped.
-func splitSSELines(data []byte) [][]byte {
+// splitSSEFrame is a bufio.SplitFunc that splits on SSE frame boundaries (\n\n or \r\n\r\n).
+// Each returned token is one complete SSE frame including its trailing newlines.
+func splitSSEFrame(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if atEOF && len(data) == 0 {
+		return 0, nil, nil
+	}
+	// \r\n\r\n first (more specific)
+	if i := bytes.Index(data, []byte("\r\n\r\n")); i >= 0 {
+		return i + 4, data[:i+4], nil
+	}
+	// \n\n
+	if i := bytes.Index(data, []byte("\n\n")); i >= 0 {
+		return i + 2, data[:i+2], nil
+	}
+	if atEOF {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
+}
+
+// splitSSEFrames splits buffered SSE data into individual complete frames.
+// Used for the initial first-frame buffer which may contain multiple frames.
+func splitSSEFrames(data []byte) [][]byte {
 	var result [][]byte
-	// Split on double-newline boundaries (SSE frame separator)
 	parts := bytes.Split(data, []byte("\n\n"))
 	for _, p := range parts {
 		p = bytes.TrimSpace(p)
@@ -240,7 +292,21 @@ func splitSSELines(data []byte) [][]byte {
 	return result
 }
 
-// stripSSEPrefix removes the "data: " prefix from an SSE line, returning raw JSON.
+// extractSSEDataLine extracts the "data: ..." line from a complete SSE frame.
+// Handles both single-line frames ("data: {...}") and multi-line frames
+// ("event: foo\ndata: {...}") as used by Anthropic upstreams.
+// Returns the full "data: <content>" line (with prefix), or nil if not found.
+func extractSSEDataLine(frame []byte) []byte {
+	for _, line := range bytes.Split(frame, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, []byte("data:")) {
+			return line
+		}
+	}
+	return nil
+}
+
+// stripSSEPrefix removes the "data: " prefix from a data line, returning raw JSON.
 func stripSSEPrefix(line []byte) []byte {
 	line = bytes.TrimSpace(line)
 	if bytes.HasPrefix(line, []byte("data:")) {
