@@ -1,0 +1,159 @@
+providers:
+  # -----------------------------------------------------------------------
+  # SenseNova：同一组 key 同时支持 OpenAI 和 Anthropic 两种格式
+  # -----------------------------------------------------------------------
+  - name: sensenova
+    api:
+      - api_format: openai          # → POST {base_url}/chat/completions
+        base_url: "https://token.sensenova.cn/v1"
+      - api_format: anthropic       # → POST {base_url}/messages
+        base_url: "https://token.sensenova.cn/v1"
+      - api_format: openai-images   # → POST {base_url}/images/generations
+        base_url: "https://token.sensenova.cn/v1"
+    max_retries: 3
+    key_strategy: "fill-first"      # fill-first | round-robin
+    keys:
+      - key: "sk-sn-xxxx-1"
+      - key: "sk-sn-xxxx-2"
+    health_check_rules:
+      # deepseek-v4-flash 的 5 小时额度限制（per key per model）
+      - description: "quota_exceeded_flash"
+        jsonpath: "$.error.type"
+        match_value: "quota_exceeded_error"
+        match_type: "equals"           # equals | contains | regex
+        action: "rotate"
+        cooldown_seconds: 18000        # 5 小时
+        models: ["deepseek-v4-flash"]  # 空列表 = 适用所有模型
+      # RPM 限速（适用所有模型，冷却 60 秒）
+      - description: "rpm_exhausted"
+        jsonpath: "$.error.message"
+        match_value: "rpm exhausted"
+        match_type: "contains"
+        action: "rotate"
+        cooldown_seconds: 60
+        models: []
+
+  # -----------------------------------------------------------------------
+  # DeepSeek 官网：仅有 OpenAI Chat Completions 接口
+  # 通过 upstream_api_format 可让 anthropic 格式的 combo 自动翻译转发到此 provider
+  # -----------------------------------------------------------------------
+  - name: deepseek
+    api:
+      - api_format: openai
+        base_url: "https://api.deepseek.com/v1"
+    max_retries: 3
+    key_strategy: "round-robin"
+    keys:
+      - key: "sk-ds-xxxx-1"
+    health_check_rules:
+      - description: "rate_limit"
+        jsonpath: "$.error.type"
+        match_value: "rate_limit_exceeded"
+        match_type: "equals"
+        action: "rotate"
+        cooldown_seconds: 60
+        models: []
+
+combos:
+  # -----------------------------------------------------------------------
+  # 单格式 combo：仅接受 OpenAI Chat Completions 格式
+  # 客户端传 model="fast" 即可；代理自动路由并改写真实 model 字段
+  # -----------------------------------------------------------------------
+  - name: "fast"
+    api_format: openai               # 单个字符串或列表均可
+    strategy: "fill-first"           # fill-first 优先第一个 member，耗尽才切换
+    members:
+      - provider: sensenova
+        model: "deepseek-v4-flash"
+      - provider: deepseek           # sensenova 耗尽后的备用
+        model: "deepseek-chat"
+
+  # -----------------------------------------------------------------------
+  # 多格式 combo：同一 combo 名同时服务 openai 和 anthropic 请求
+  # provider 原生支持两种格式时直接转发，无需翻译
+  # -----------------------------------------------------------------------
+  - name: "smart"
+    api_format:
+      - openai
+      - anthropic
+    strategy: "fill-first"
+    members:
+      - provider: sensenova
+        model: "deepseek-v4-flash"
+    aliases:
+      - "deepseek-v4-flash"          # 客户端也可以用原始模型名访问
+
+  # -----------------------------------------------------------------------
+  # 跨格式翻译 combo：combo 接受 anthropic 格式，但 provider 只有 openai 接口
+  # 设置 upstream_api_format: openai 后，ccrouter 自动通过 CLIProxyAPI translator
+  # 将 anthropic 请求翻译为 openai，将 openai 响应翻译回 anthropic
+  # -----------------------------------------------------------------------
+  - name: "fast-ant"
+    api_format: anthropic
+    strategy: "fill-first"
+    members:
+      - provider: deepseek
+        model: "deepseek-chat"
+        upstream_api_format: openai  # deepseek 只有 openai 端点，翻译后转发
+
+  # -----------------------------------------------------------------------
+  # Responses API 格式 combo
+  # -----------------------------------------------------------------------
+  - name: "fast-resp"
+    api_format: openai-responses
+    strategy: "fill-first"
+    members:
+      - provider: sensenova
+        model: "deepseek-v4-flash"
+
+  # -----------------------------------------------------------------------
+  # 图像生成 combo
+  # -----------------------------------------------------------------------
+  - name: "image"
+    api_format: openai-images
+    strategy: "fill-first"
+    members:
+      - provider: sensenova
+        model: "sensenova-u1-fast"
+
+# ---------------------------------------------------------------------------
+# 详细日志（可选，默认 false）
+# 写入 cwd/logs/requests.jsonl（含完整请求体，含密钥明文，仅限私有网络）
+# ---------------------------------------------------------------------------
+verbose_logging: false
+
+# ---------------------------------------------------------------------------
+# Payload 改写脚本列表（可选，默认为空）
+# 脚本语言：expr-lang (https://expr-lang.org)
+# 按顺序执行，前一个脚本的修改结果传给下一个；disabled 脚本自动跳过
+# ---------------------------------------------------------------------------
+payload_scripts:
+  # -----------------------------------------------------------------------
+  # 脚本 1：删除可能暴露客户端信息的 headers
+  # -----------------------------------------------------------------------
+  - name: "隐藏客户端标识"
+    enabled: true
+    script: |
+      delh(headers, "user-agent")
+      delh(headers, "x-client-version")
+      del(body, "x_client_info")
+
+  # -----------------------------------------------------------------------
+  # 脚本 2：将 adaptive thinking 改写为 enabled（deepseek-v4-flash 专用）
+  # -----------------------------------------------------------------------
+  - name: "thinking_adaptive_to_enabled"
+    enabled: true
+    script: |
+      combo == "smart" && "thinking" in body && "type" in body.thinking && body.thinking.type == "adaptive"
+        ? setpath(body, "thinking", "type", "enabled")
+        : nil
+
+  # -----------------------------------------------------------------------
+  # 脚本 3：对指定 combo 限制 thinking 预算（当前已禁用，方便复用时开启）
+  # -----------------------------------------------------------------------
+  - name: "fast combo 限制 thinking 预算"
+    enabled: false
+    script: |
+      combo == "fast" && "thinking" in body
+        ? setpath(body, "thinking", "budget_tokens", clamp(get(body.thinking, "budget_tokens", 8000), 0, 1024))
+        : nil

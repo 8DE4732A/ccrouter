@@ -1,0 +1,210 @@
+# ccrouter 配置 Schema
+# 本文件是结构说明，不可直接用作运行配置。
+# 运行配置请参考 config-example.yaml。
+#
+# 符号约定
+#   <type>        必填字段，类型说明
+#   [<type>]      可选字段，带默认值
+#   |             枚举值分隔符
+
+# ===========================================================================
+# 顶层
+# ===========================================================================
+
+providers:           # list，至少一个 ProviderConfig
+  - <ProviderConfig>
+
+combos:              # list，至少一个 ComboConfig
+  - <ComboConfig>
+
+verbose_logging:     [bool, default=false]
+                     # 是否将完整请求报文写入 cwd/logs/requests.jsonl
+                     # 含请求 body、响应 body、headers（含密钥明文），仅限私有网络使用
+
+payload_scripts:     [list[PayloadScript], default=[]]
+                     # 转发前按顺序执行的 expr 脚本列表；disabled 脚本自动跳过
+
+
+# ===========================================================================
+# ProviderConfig
+# ===========================================================================
+# 表示一个上游服务商。
+# 同一组 key 可通过多个 api 入口支持不同的 API 格式。
+
+ProviderConfig:
+  name:               <string>                  # 唯一标识符，供 combo.members 引用
+  api:                <list[ApiEndpoint]>        # 至少一个，同一 api_format 不可重复
+  max_retries:        [int, default=3]           # 在本 provider 内最多尝试几次（含首次）；≥0
+  key_strategy:       [fill-first | round-robin, default=fill-first]
+                                                 # fill-first：始终优先第一个可用 key
+                                                 # round-robin：轮询分摊请求
+  keys:               <list[KeyConfig]>          # 至少一个
+  health_check_rules: [list[HealthCheckRule], default=[]]
+
+
+# ===========================================================================
+# ApiEndpoint
+# ===========================================================================
+# 一个 (api_format, base_url) 对，决定上游请求转发到哪个路径。
+
+ApiEndpoint:
+  api_format:  <openai | anthropic | openai-responses | openai-images | gemini>
+               # openai           → POST {base_url}/chat/completions
+               # anthropic        → POST {base_url}/messages
+               # openai-responses → POST {base_url}/responses
+               # openai-images    → POST {base_url}/images/generations
+               # gemini           → POST {base_url}/models  （上游专用，不对客户端开放路由）
+  base_url:    <string>   # 上游 base URL，末尾 / 会被自动去掉
+
+
+# ===========================================================================
+# KeyConfig
+# ===========================================================================
+
+KeyConfig:
+  key:  <string>   # API 密钥明文，不可为空
+
+
+# ===========================================================================
+# HealthCheckRule
+# ===========================================================================
+# 当上游响应（或 SSE 首帧）的 JSON 匹配规则时，触发 key 轮换并进入冷却。
+# 冷却粒度为 (key, model)，不同模型互不影响。
+# 冷却状态保存在内存中；进程重启后清零。
+
+HealthCheckRule:
+  description:      [string, default=""]       # 可读标注，出现在日志和统计里
+  jsonpath:         [string, default="$.error.type"]
+                                               # JSONPath 表达式，定位响应中的字段
+  match_value:      [string, default="quota_exceeded_error"]
+                                               # 与 JSONPath 结果比较的目标值
+  match_type:       [equals | contains | regex, default=equals]
+                                               # equals：完全相等
+                                               # contains：子串匹配
+                                               # regex：正则匹配（Go regexp 语法）
+  action:           [rotate, default=rotate]   # 目前仅支持 rotate
+  cooldown_seconds: [int, default=60]          # 触发后该 (key, model) 的冷却时长（秒）；≥0
+  models:           [list[string], default=[]] # 限定生效的模型 ID；空列表 = 所有模型
+
+
+# ===========================================================================
+# ComboConfig
+# ===========================================================================
+# 客户端使用的「虚拟模型名」。
+# 请求体的 model 字段填 combo 名称，代理路由后改写为 member 的真实 model。
+
+ComboConfig:
+  name:        <string>                    # 唯一标识符，即客户端传的 model 值
+  api_format:  <format | list[format]>     # 单值或列表，决定此 combo 接受哪些客户端格式
+                                           # 可选值：openai | anthropic | openai-responses | openai-images
+                                           # openai           → /v1/chat/completions
+                                           # anthropic        → /v1/messages
+                                           # openai-responses → /v1/responses
+                                           # openai-images    → /v1/images/generations
+  strategy:    [fill-first | round-robin, default=fill-first]
+                                           # fill-first：优先第一个 member，耗尽才切换
+                                           # round-robin：每次请求轮询 member
+  members:     <list[ComboMember]>         # 至少一个
+  aliases:     [list[string], default=[]] # 额外的客户端可用名称（透明转发到本 combo）
+
+
+# ===========================================================================
+# ComboMember
+# ===========================================================================
+# (provider, model) 对，按 strategy 顺序选用。
+
+ComboMember:
+  provider:            <string>   # 必须与某个 ProviderConfig.name 一致
+  model:               <string>   # 转发给上游的真实模型 ID
+  upstream_api_format: [string]   # 可选：指定发往此上游的 API 格式（用于跨格式翻译）
+                                  # 解析优先级：
+                                  #   1. provider 原生支持客户端格式 → 直接转发（忽略本字段）
+                                  #   2. 设置了本字段且 provider 有对应端点 → 翻译后转发
+                                  #   3. 否则取 provider 第一个端点 → 翻译后转发
+                                  # 翻译通过 CLIProxyAPI translator 完成，支持：
+                                  #   openai ↔ anthropic、openai ↔ gemini 等互转
+                                  # 翻译标记记录在请求明细 matched_payload 字段（如 anthropic→openai）
+
+
+# ===========================================================================
+# PayloadScript
+# ===========================================================================
+# 一个有名称、可启用/禁用的 expr 脚本。
+# 脚本按列表顺序执行，每个脚本的输出（修改后的 body/headers）是下一个脚本的输入。
+# disabled 脚本保留在列表中但不执行，方便临时关闭。
+#
+# 脚本语言：expr-lang（https://expr-lang.org）
+# 每行一条独立表达式，空行分隔；多行三元表达式可跨行书写。
+# 脚本在沙箱中运行（无 IO/系统调用），安全用于生产。
+#
+# 执行环境中可用变量（脚本编译时已类型检查）：
+#   body        — 请求 body（map），可通过 set/del/setpath 改写
+#   headers     — 请求 headers（map），可通过 seth/delh 改写
+#   combo       — 客户端传的 combo/model 名（string，只读）
+#   path        — 请求路径，如 /v1/chat/completions（string，只读）
+#   provider    — 选中的上游 provider 名（string，只读）
+#   model       — 发给上游的真实模型 ID（string，只读）
+#   api_format  — 上游 API 格式（string，只读）
+#
+# 内置函数：
+#   set(body, "key", value)              — body["key"] = value
+#   del(body, "key")                     — delete body["key"]
+#   setpath(body, "k1", "k2", value)     — 嵌套赋值，自动创建中间 map
+#   get(body, "key", default)            — body["key"] 不存在时返回 default
+#   clamp(v, min, max)                   — 数值裁剪
+#   seth(headers, "key", value)          — headers["key"] = value
+#   delh(headers, "key")                 — delete headers["key"]
+
+PayloadScript:
+  name:     [string, default=""]    # 可读名称，出现在请求明细 matched_payload 字段
+  enabled:  [bool, default=true]    # false = 跳过此脚本（保留配置，方便复用）
+  script:   [string, default=""]    # expr 脚本体；建议用 YAML | 块标量格式
+
+
+# ===========================================================================
+# 完整请求流程
+# ===========================================================================
+#
+# 1. 客户端 → POST /v1/chat/completions（或 /v1/messages、/v1/responses 等）
+#    请求体 {"model": "<combo_name_or_alias>", ...}
+#
+# 2. 代理查找 combo（名称或别名），验证端点格式匹配
+#
+# 3. 按 combo.strategy 选 (provider, model) 成员：
+#    - fill-first：顺序尝试，当前 member 的所有 key 耗尽才切下一个
+#    - round-robin：每次请求轮换到不同 member
+#
+# 4. 解析上游 API 格式（native → hint → fallback），如需翻译则转换请求体
+#
+# 5. 执行 payload_scripts（已翻译后的 body 和 headers）
+#
+# 6. 在选中的 provider 内，按 key_strategy 选 key：
+#    - 发送请求（改写 model 字段 + 替换 Authorization header）
+#    - 若命中 health_check_rule → 该 (key, model) 进入冷却，换 key 重试
+#    - 若所有 key 冷却中 → 换下一个 combo member
+#    - 若所有 member 耗尽 → 返回 503
+#
+# 7. 成功响应：如有翻译则反向转换响应体，再透传给客户端（流式 SSE 逐帧转换）
+#
+# ===========================================================================
+# 端点 → api_format 对应表（客户端）
+# ===========================================================================
+#
+#   POST /v1/chat/completions  ←→  openai
+#   POST /v1/messages          ←→  anthropic
+#   POST /v1/responses         ←→  openai-responses
+#   POST /v1/images/generations←→  openai-images
+#
+# GET  /v1/models                  可用模型列表（OpenAI 兼容格式）
+# GET  /health                     健康检查
+# GET  /keys/status                实时 key 池状态（含冷却信息）
+# GET  /admin/                     管理页面
+# GET  /admin/api/config           查看/编辑配置（热重载）
+# GET  /admin/api/stats/keys       key 状态统计
+# GET  /admin/api/stats/summary    聚合统计（按 combo/provider/model 分组）
+# GET  /admin/api/stats/trend      时间趋势（按小时/天分桶）
+# GET  /admin/api/requests         请求明细列表
+# GET  /admin/api/info             运行时信息（版本、combo/provider 列表）
+# GET  /admin/api/health           服务健康状态
+# GET  /admin/api/logs             详细请求报文（需开启 verbose_logging）
+# GET  /admin/api/logs/settings    查看/切换 verbose_logging

@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── Checkout ────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── Node.js (frontend) ──────────────────────────────
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build frontend
+        run: |
+          cd web
+          npm ci
+          npm run build
+
+      # ── Go (backend) ────────────────────────────────────
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Go vet
+        run: go vet ./...
+
+      - name: Run tests
+        run: go test ./...
+
+      # ── Cross-compile for all platforms ─────────────────
+      - name: Build binaries
+        run: |
+          mkdir -p dist
+          # version is defined in internal/server/admin.go; inject via its full package path
+          LDFLAGS="-s -w -X ccrouter/internal/server.version=${{ github.ref_name }}"
+
+          GOOS=linux   GOARCH=amd64  go build -ldflags="$LDFLAGS" -o dist/ccrouter-linux-amd64        ./cmd/ccrouter
+          GOOS=linux   GOARCH=arm64  go build -ldflags="$LDFLAGS" -o dist/ccrouter-linux-arm64        ./cmd/ccrouter
+          GOOS=darwin  GOARCH=amd64  go build -ldflags="$LDFLAGS" -o dist/ccrouter-darwin-amd64       ./cmd/ccrouter
+          GOOS=darwin  GOARCH=arm64  go build -ldflags="$LDFLAGS" -o dist/ccrouter-darwin-arm64       ./cmd/ccrouter
+          GOOS=windows GOARCH=amd64  go build -ldflags="$LDFLAGS" -o dist/ccrouter-windows-amd64.exe  ./cmd/ccrouter
+
+          # Bundle example config alongside binaries so users have a reference
+          cp config-example.yaml dist/
+          cp config-schema.yaml  dist/
+
+      # ── Publish GitHub Release ───────────────────────────
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
