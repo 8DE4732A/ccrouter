@@ -571,18 +571,17 @@ function ProviderProxyField({
           ['custom', '自定义代理'] as const,
           ['disabled', '不走代理'] as const,
         ]).map(([val, label]) => (
-          <label key={val} style={{
+          <label key={val} onClick={() => {
+            if (val === 'inherit') onChange(undefined)
+            else if (val === 'disabled') onChange({ disabled: true })
+            else onChange({ url: '' })
+          }} style={{
             display: 'flex', alignItems: 'center', gap: 5,
             padding: '5px 10px', borderRadius: 5, cursor: 'pointer',
             border: `1px solid ${mode === val ? 'var(--accent)' : 'var(--border-md)'}`,
             background: mode === val ? 'var(--accent-light)' : 'var(--bg-input)',
             fontSize: 12, fontWeight: mode === val ? 600 : 400, userSelect: 'none',
           }}>
-            <input type="radio" name="proxy-mode" checked={mode === val} onChange={() => {
-              if (val === 'inherit') onChange(undefined)
-              else if (val === 'disabled') onChange({ disabled: true })
-              else onChange({ url: '' })
-            }} style={{ display: 'none' }} />
             {label}
           </label>
         ))}
