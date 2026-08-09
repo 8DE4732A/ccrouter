@@ -31,6 +31,35 @@ func extractUsage(body []byte, apiFormat string) map[string]any {
 		}
 	}
 
+	// openai-responses non-stream: usage is nested in response.completed event
+	if apiFormat == "openai-responses" {
+		// response.completed event format: {"type":"response.completed","response":{...,"usage":{...}}}
+		if typ, _ := data["type"].(string); typ == "response.completed" || typ == "response.incomplete" {
+			resp, _ := data["response"].(map[string]any)
+			data = resp
+		}
+		// Direct response object: {"object":"response","usage":{...}}
+		// (or unwrapped from the event above)
+		u, _ := data["usage"].(map[string]any)
+		if u == nil {
+			return map[string]any{}
+		}
+		inp := keep(u["input_tokens"])
+		out := keep(u["output_tokens"])
+		total := keep(u["total_tokens"])
+		var cached any
+		if details, _ := u["input_tokens_details"].(map[string]any); details != nil {
+			cached = keep(details["cached_tokens"])
+		}
+		return map[string]any{
+			"prompt_tokens":      inp,
+			"completion_tokens":  out,
+			"total_tokens":       total,
+			"cache_read_tokens":  cached,
+			"cache_write_tokens": nil,
+		}
+	}
+
 	u, _ := data["usage"].(map[string]any)
 	if u == nil {
 		return map[string]any{}
@@ -133,6 +162,20 @@ func sniffUsageChunk(chunk []byte, apiFormat string, holder *usageHolder) {
 				holder.usage["completion_tokens"] = keep(u["candidatesTokenCount"])
 				holder.usage["total_tokens"] = keep(u["totalTokenCount"])
 				holder.usage["cache_read_tokens"] = keep(u["cachedContentTokenCount"])
+			}
+		} else if apiFormat == "openai-responses" {
+			// OpenAI Responses API SSE: usage in response.completed event
+			if event["type"] == "response.completed" {
+				resp, _ := event["response"].(map[string]any)
+				u, _ := resp["usage"].(map[string]any)
+				if u != nil {
+					holder.usage["prompt_tokens"] = keep(u["input_tokens"])
+					holder.usage["completion_tokens"] = keep(u["output_tokens"])
+					holder.usage["total_tokens"] = keep(u["total_tokens"])
+					if details, _ := u["input_tokens_details"].(map[string]any); details != nil {
+						holder.usage["cache_read_tokens"] = keep(details["cached_tokens"])
+					}
+				}
 			}
 		} else if apiFormat == "anthropic" {
 			if event["type"] == "message_start" {

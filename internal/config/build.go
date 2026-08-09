@@ -98,6 +98,43 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 		cfg.Combos = append(cfg.Combos, *cc)
 	}
 
+	// ---- general ----
+	if v, ok := raw["general"]; ok && v != nil {
+		gm, err := asMap(v, "general")
+		if err != nil {
+			return nil, err
+		}
+		// api_keys
+		if av, ok := gm["api_keys"]; ok {
+			arr, ok := av.([]any)
+			if !ok {
+				return nil, errf("'general.api_keys' must be a list")
+			}
+			for i, kv := range arr {
+				km, err := asMap(kv, fmt.Sprintf("general.api_keys[%d]", i))
+				if err != nil {
+					return nil, err
+				}
+				key := strings.TrimSpace(strVal(km["key"]))
+				if key == "" {
+					continue
+				}
+				cfg.General.APIKeys = append(cfg.General.APIKeys, APIKeyEntry{Key: key})
+			}
+		}
+		// proxy
+		if pv, ok := gm["proxy"]; ok && pv != nil {
+			pm, err := asMap(pv, "general.proxy")
+			if err != nil {
+				return nil, err
+			}
+			cfg.General.Proxy = &ProxyConfig{
+				URL:      strings.TrimSpace(strVal(pm["url"])),
+				Disabled: toBool(pm["disabled"]),
+			}
+		}
+	}
+
 	// ---- verbose_logging ----
 	if v, ok := raw["verbose_logging"]; ok {
 		cfg.VerboseLogging = toBool(v)
@@ -212,6 +249,18 @@ func buildProvider(p map[string]any, idx int) (*ProviderConfig, error) {
 				return nil, err
 			}
 			pc.HealthCheckRules = append(pc.HealthCheckRules, *rule)
+		}
+	}
+
+	// proxy (optional per-provider override)
+	if v, ok := p["proxy"]; ok && v != nil {
+		pm, err := asMap(v, fmt.Sprintf("providers[%d].proxy", idx))
+		if err != nil {
+			return nil, err
+		}
+		pc.Proxy = &ProxyConfig{
+			URL:      strings.TrimSpace(strVal(pm["url"])),
+			Disabled: toBool(pm["disabled"]),
 		}
 	}
 

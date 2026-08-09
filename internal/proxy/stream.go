@@ -149,13 +149,27 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 			if len(line) == 0 {
 				continue
 			}
+			// Normalize non-standard reasoning field variants before translation.
+			translationLine := line
+			if upstreamAPIFormat == "openai" {
+				translationLine = normalizeOpenAIReasoningField(stripSSEPrefix(line))
+				// Re-add data: prefix so the translator can strip it again.
+				if !bytes.HasPrefix(translationLine, []byte("data:")) {
+					translationLine = append([]byte("data: "), translationLine...)
+				}
+			}
 			translated := translate.TranslateResponseStream(
 				ctx, clientAPIFormat, upstreamAPIFormat, model,
-				originalClientBody, body, line, &translateParam,
+				originalClientBody, body, translationLine, &translateParam,
 			)
 			for _, out := range translated {
 				if len(out) == 0 {
 					continue
+				}
+				// CLIProxyAPI translators return bare JSON bytes without SSE framing.
+				// Wrap in "data: ...\n\n" so the client receives valid SSE.
+				if !bytes.HasPrefix(out, []byte("data:")) {
+					out = append([]byte("data: "), append(out, '\n', '\n')...)
 				}
 				_, werr := w.Write(out)
 				if doAccumulate {
@@ -220,6 +234,15 @@ func splitSSELines(data []byte) [][]byte {
 		}
 	}
 	return result
+}
+
+// stripSSEPrefix removes the "data: " prefix from an SSE line, returning raw JSON.
+func stripSSEPrefix(line []byte) []byte {
+	line = bytes.TrimSpace(line)
+	if bytes.HasPrefix(line, []byte("data:")) {
+		return bytes.TrimSpace(line[5:])
+	}
+	return line
 }
 
 func (s *Service) finishStream(combo, providerName, model, key, clientAPIFormat string,

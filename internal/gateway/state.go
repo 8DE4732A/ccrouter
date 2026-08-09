@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"context"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -74,7 +76,6 @@ func buildProxyClient(globalProxy *config.ProxyConfig, providerProxy *config.Pro
 
 	switch proxyURL.Scheme {
 	case "socks5", "socks5h":
-		// Use golang.org/x/net/proxy for SOCKS5.
 		auth := &proxy.Auth{}
 		if proxyURL.User != nil {
 			auth.User = proxyURL.User.Username()
@@ -85,7 +86,16 @@ func buildProxyClient(globalProxy *config.ProxyConfig, providerProxy *config.Pro
 		}
 		dialer, err := proxy.SOCKS5("tcp", proxyURL.Host, auth, proxy.Direct)
 		if err == nil {
-			transport.Dial = dialer.Dial //nolint:staticcheck
+			// Use DialContext if the dialer supports it (preferred); fall back to Dial.
+			if cd, ok := dialer.(interface {
+				DialContext(ctx context.Context, network, addr string) (net.Conn, error)
+			}); ok {
+				transport.DialContext = cd.DialContext
+			} else {
+				transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return dialer.Dial(network, addr)
+				}
+			}
 		}
 	default:
 		// http/https proxy — use http.Transport built-in support.

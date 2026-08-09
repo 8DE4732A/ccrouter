@@ -16,59 +16,71 @@ import (
 
 // ccrouter format name → CLIProxyAPI format name.
 //
-// CLIProxyAPI uses "codex" to represent the OpenAI Responses API (/v1/responses)
-// as an *upstream* format (i.e. the target the proxy sends requests to).
-// "openai-response" (no 's') is CLIProxyAPI's *entry* format for clients that
-// speak the Responses API — it is never used as an upstream target.
+// "openai-responses" has dual semantics in CLIProxyAPI:
+//   - As client entry format → "openai-response" (OpenaiResponse)
+//   - As upstream target format → "codex" (Codex)
 //
-// Mapping table (ccrouter → CLIProxyAPI):
-//   openai           → openai           (chat/completions, same name)
-//   anthropic        → claude           (Anthropic Messages API)
-//   openai-responses → codex            (OpenAI Responses API as upstream)
-//   gemini           → gemini           (same name)
-var nameMap = map[string]string{
+// We use separate maps for request direction (client→upstream) and
+// response direction (upstream→client) to pick the right SDK name.
+//
+// Request translation: from=clientFmt(entry), to=upstreamFmt(target)
+//   openai-responses as FROM (client) → "openai-response"
+//   openai-responses as TO (upstream) → "codex"
+//
+// Response translation: from=upstreamFmt, to=clientFmt — same mapping reversed.
+var clientFmtMap = map[string]string{
 	"anthropic":        "claude",
-	"openai-responses": "codex",
+	"openai-responses": "openai-response", // client speaks responses API
 }
 
-func toSDKFormat(f string) sdkt.Format {
-	if mapped, ok := nameMap[f]; ok {
+var upstreamFmtMap = map[string]string{
+	"anthropic":        "claude",
+	"openai-responses": "codex", // upstream speaks responses API (/v1/responses)
+}
+
+func toClientSDKFormat(f string) sdkt.Format {
+	if mapped, ok := clientFmtMap[f]; ok {
 		return sdkt.FromString(mapped)
 	}
 	return sdkt.FromString(f)
 }
 
-// NeedTranslate reports whether a request/response translation is needed
-// between clientFmt (what the caller sent) and upstreamFmt (what the upstream expects).
+func toUpstreamSDKFormat(f string) sdkt.Format {
+	if mapped, ok := upstreamFmtMap[f]; ok {
+		return sdkt.FromString(mapped)
+	}
+	return sdkt.FromString(f)
+}
+
+// NeedTranslate reports whether a request/response translation is needed.
 func NeedTranslate(clientFmt, upstreamFmt string) bool {
 	if clientFmt == upstreamFmt {
 		return false
 	}
-	from := toSDKFormat(clientFmt)
-	to := toSDKFormat(upstreamFmt)
+	from := toClientSDKFormat(clientFmt)
+	to := toUpstreamSDKFormat(upstreamFmt)
 	return sdkt.HasRequestTransformer(from, to) || sdkt.HasResponseTransformer(from, to)
 }
 
 // TranslateRequest converts a raw JSON request body from clientFmt to upstreamFmt.
-// If no translator is registered the original body is returned unchanged.
 func TranslateRequest(clientFmt, upstreamFmt, model string, rawJSON []byte, stream bool) []byte {
-	from := toSDKFormat(clientFmt)
-	to := toSDKFormat(upstreamFmt)
+	from := toClientSDKFormat(clientFmt)
+	to := toUpstreamSDKFormat(upstreamFmt)
 	return sdkt.TranslateRequest(from, to, model, rawJSON, stream)
 }
 
 // TranslateResponseStream converts a single SSE data line from upstreamFmt back to clientFmt.
-// param must be passed across consecutive calls for the same stream so the translator
-// can carry state between chunks (e.g. usage accumulation in Claude).
-// Returns zero or more output lines (each is a complete "data: …\n\n" frame or similar).
+// Response direction: upstream → client.
+// upstream format uses upstreamFmtMap (same as request "to") because the upstream responds
+// in its native format (e.g. codex responds with codex SSE, not openai-response SSE).
 func TranslateResponseStream(
 	ctx context.Context,
 	clientFmt, upstreamFmt, model string,
 	originalReq, translatedReq, chunk []byte,
 	param *any,
 ) [][]byte {
-	from := toSDKFormat(upstreamFmt) // upstream → client
-	to := toSDKFormat(clientFmt)
+	from := toUpstreamSDKFormat(upstreamFmt) // upstream responds in its native format
+	to := toClientSDKFormat(clientFmt)
 	return sdkt.TranslateStream(ctx, from, to, model, originalReq, translatedReq, chunk, param)
 }
 
@@ -79,8 +91,8 @@ func TranslateResponseNonStream(
 	originalReq, translatedReq, body []byte,
 	param *any,
 ) []byte {
-	from := toSDKFormat(upstreamFmt)
-	to := toSDKFormat(clientFmt)
+	from := toUpstreamSDKFormat(upstreamFmt)
+	to := toClientSDKFormat(clientFmt)
 	return sdkt.TranslateNonStream(ctx, from, to, model, originalReq, translatedReq, body, param)
 }
 

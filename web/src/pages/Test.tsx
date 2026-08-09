@@ -23,6 +23,7 @@ function buildBody(
       model,
       messages: [{ role: 'user', content: prompt }],
       max_tokens: maxTokens,
+      stream,
       ...(thinking !== 'off' ? { thinking: { type: 'enabled', budget_tokens: ANTHROPIC_BUDGET[thinking] } } : {}),
     }
   }
@@ -30,6 +31,7 @@ function buildBody(
     return {
       model,
       input: prompt,
+      stream,
       ...(thinking !== 'off' ? { reasoning: { effort: thinking } } : {}),
     }
   }
@@ -183,6 +185,7 @@ export default function TestPage() {
   const [statusCode, setStatusCode] = useState<number | null>(null)
   const [copied, setCopied] = useState(false)
   const [thinkingOpen, setThinkingOpen] = useState(true)
+  const [apiKey, setApiKey] = useState('')
   const abortRef = useRef<AbortController | null>(null)
   const outputRef = useRef<HTMLDivElement>(null)
   const t0Ref = useRef<number>(0)
@@ -194,6 +197,9 @@ export default function TestPage() {
         setComboName(c.combos[0].name)
         setFmt(normalizeFormats(c.combos[0].api_format)[0])
       }
+      // Pre-fill API key from general config if available
+      const firstKey = c.general?.api_keys?.[0]?.key
+      if (firstKey) setApiKey(firstKey)
     }).catch(() => {})
   }, [])
 
@@ -234,7 +240,10 @@ export default function TestPage() {
       const body = buildBody(fmt, comboName, prompt.trim(), stream, imageSizeCustom.trim() || imageSize, thinking)
       const resp = await fetch(FMT_ENDPOINT[fmt], {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer test' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+        },
         body: JSON.stringify(body),
         signal: ctrl.signal,
       })
@@ -245,7 +254,7 @@ export default function TestPage() {
         throw new Error(`HTTP ${resp.status}: ${txt}`)
       }
 
-      if (stream && resp.headers.get('content-type')?.includes('text/event-stream')) {
+      if (resp.headers.get('content-type')?.includes('text/event-stream')) {
         setState('streaming')
         const reader = resp.body!.getReader()
         const decoder = new TextDecoder()
@@ -315,6 +324,24 @@ export default function TestPage() {
         {/* ── Left: config panel ── */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
 
+          {/* API Key */}
+          <div className="card">
+            <div className="card-body-simple">
+              <div className="field-label" style={{ marginBottom: 5 }}>
+                API 密钥
+                <span className="dim" style={{ marginLeft: 6 }}>未配置认证时可留空</span>
+              </div>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={e => setApiKey(e.target.value)}
+                placeholder="sk-..."
+                style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                disabled={state === 'streaming' || state === 'sending'}
+              />
+            </div>
+          </div>
+
           {/* Combo + format */}
           <div className="card">
             <div className="card-body-simple">
@@ -339,7 +366,10 @@ export default function TestPage() {
                         key={f}
                         className={fmt === f ? 'btn-primary' : ''}
                         style={{ fontSize: 12, padding: '4px 10px', ...(fmt !== f ? {} : {}) }}
-                        onClick={() => setFmt(f)}
+                        onClick={() => {
+                          setFmt(f)
+                          if (f === 'openai-images') setStream(false)
+                        }}
                         disabled={state === 'streaming' || state === 'sending'}
                       >
                         {f}
@@ -355,11 +385,11 @@ export default function TestPage() {
                       type="checkbox"
                       checked={stream}
                       onChange={e => setStream(e.target.checked)}
-                      disabled={fmt === 'openai-responses' || fmt === 'openai-images' || state === 'streaming' || state === 'sending'}
+                      disabled={fmt === 'openai-images' || state === 'streaming' || state === 'sending'}
                     />
                     <span className="field-label">流式响应（SSE）</span>
-                    {(fmt === 'openai-responses' || fmt === 'openai-images') && (
-                      <span className="dim">— {fmt === 'openai-images' ? '图像 API 不支持流式' : 'responses API 固定流式'}</span>
+                    {fmt === 'openai-images' && (
+                      <span className="dim">— 图像 API 不支持流式</span>
                     )}
                   </label>
                 </div>

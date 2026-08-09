@@ -187,8 +187,11 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		}
 
 		// For Gemini, strip "model" from body (it's encoded in the URL, not the body).
+		// Also add includeThoughts:true when thinkingConfig is present so Gemini returns
+		// thought parts that can be translated back to client thinking blocks.
 		if upstreamFmt == "gemini" {
 			upstreamBody = stripModelField(upstreamBody)
+			upstreamBody = ensureGeminiIncludeThoughts(upstreamBody)
 		}
 
 		attemptedKeys := map[string]bool{}
@@ -263,7 +266,164 @@ func (s *Service) attempt(w http.ResponseWriter, r *http.Request, t0 time.Time, 
 	if isStream {
 		return s.attemptStreaming(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
 	}
+	// openai-responses upstream always returns SSE regardless of the stream flag.
+	// For a non-streaming client request, consume the SSE internally, extract the
+	// final response.completed event, then translate and return as a single JSON body.
+	if upstreamAPIFormat == "openai-responses" {
+		return s.attemptNonStreamingViaSSE(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
+	}
 	return s.attemptNonStreaming(w, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
+}
+
+// attemptNonStreamingViaSSE handles upstreams that always return SSE (e.g. openai-responses)
+// even when the client requested a non-streaming response.
+// It consumes the full SSE stream internally, extracts the final completed event,
+// translates it to the client format, and returns a single JSON response.
+func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Request, t0 time.Time, km *keys.Manager,
+	targetURL string, headers http.Header, body []byte, providerName, model, combo, key,
+	clientAPIFormat, upstreamAPIFormat, matchedPayload string,
+	originalClientBody []byte,
+	clientCtx, upstreamCtx map[string]any) (bool, *config.HealthCheckRule) {
+
+	upstreamURL := targetURL
+	if upstreamAPIFormat == "gemini" {
+		upstreamURL = appendGeminiKey(targetURL, key)
+	}
+	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		jsonError(w, 500, fmt.Sprintf("failed to build upstream request: %v", err), "proxy_error")
+		return true, nil
+	}
+	req.Header = headers
+
+	resp, err := s.clientFor(providerName).Do(req)
+	if err != nil {
+		return s.networkError(w, t0, err, km, providerName, model, false, combo, key, clientAPIFormat, matchedPayload), nil
+	}
+	defer resp.Body.Close()
+
+	statusCode := resp.StatusCode
+	httpOK := statusCode < 400
+	rawBody, _ := io.ReadAll(resp.Body)
+
+	if !httpOK {
+		matched := s.matchRotationRules(rawBody, providerName, model)
+		if matched != nil {
+			return false, matched
+		}
+		usage := map[string]any{}
+		errText := extractErrorText(rawBody)
+		s.record(combo, providerName, model, key, clientAPIFormat, false, &statusCode, false, "", usage, t0, &errText, &matchedPayload)
+		copyResponseHeader(w, resp.Header)
+		w.WriteHeader(statusCode)
+		_, _ = w.Write(rawBody)
+		return true, nil
+	}
+
+	// Scan SSE stream for the final response.completed event.
+	// Some upstreams (e.g. OpenRouter /v1/responses) return a mix of keepalive
+	// lines and a final JSON object without SSE framing. Try SSE parsing first,
+	// then fall back to extracting the last non-empty JSON line.
+	completedJSON := extractSSECompletedEvent(rawBody)
+	if len(completedJSON) == 0 {
+		completedJSON = extractLastJSONLine(rawBody)
+	}
+	if len(completedJSON) == 0 {
+		completedJSON = rawBody
+	}
+	// If the JSON is a bare "response" object (not wrapped in a response.completed event),
+	// wrap it so translators that expect {"type":"response.completed","response":{...}} work correctly.
+	completedJSON = wrapResponseCompletedIfNeeded(completedJSON)
+
+	usage := extractUsage(completedJSON, upstreamAPIFormat)
+	km.RecordSuccess(key, model)
+
+	outBody := completedJSON
+	if upstreamAPIFormat != clientAPIFormat {
+		var param any
+		if translated := translate.TranslateResponseNonStream(
+			req.Context(), clientAPIFormat, upstreamAPIFormat, model,
+			originalClientBody, body, completedJSON, &param,
+		); len(translated) > 0 {
+			outBody = translated
+		}
+	}
+
+	s.record(combo, providerName, model, key, clientAPIFormat, false, &statusCode, true, "", usage, t0, nil, &matchedPayload)
+
+	if clientCtx != nil && upstreamCtx != nil {
+		s.reportLog(combo, providerName, model, clientAPIFormat, false, statusCode, true,
+			int(time.Since(t0).Milliseconds()), clientCtx, upstreamCtx,
+			map[string]any{
+				"status_code": statusCode,
+				"headers":     headerToMap(resp.Header),
+				"body":        tryParseJSON(outBody),
+			})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(outBody)
+	return true, nil
+}
+
+// extractSSECompletedEvent scans raw SSE bytes and returns the JSON body of the
+// last response.completed (or response.incomplete) event, or nil if not found.
+func extractSSECompletedEvent(sseBody []byte) []byte {
+	var last []byte
+	for _, line := range strings.Split(string(sseBody), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "[DONE]" || data == "" {
+			continue
+		}
+		if strings.Contains(data, `"response.completed"`) || strings.Contains(data, `"response.incomplete"`) {
+			last = []byte(data)
+		}
+	}
+	return last
+}
+
+// extractLastJSONLine returns the last non-empty line that looks like a JSON object.
+// Used as fallback when upstream returns plain JSON with keepalive padding.
+func extractLastJSONLine(body []byte) []byte {
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(line, "{") && strings.HasSuffix(line, "}") {
+			return []byte(line)
+		}
+	}
+	return nil
+}
+
+// wrapResponseCompletedIfNeeded wraps a bare response object in a response.completed
+// event envelope if it isn't already wrapped. CLIProxyAPI translators expect
+// {"type":"response.completed","response":{...}} as input.
+func wrapResponseCompletedIfNeeded(body []byte) []byte {
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+	// Already wrapped.
+	if t, _ := data["type"].(string); t == "response.completed" || t == "response.incomplete" {
+		return body
+	}
+	// If it looks like a response object, wrap it.
+	if obj, _ := data["object"].(string); obj == "response" {
+		wrapped, err := json.Marshal(map[string]any{
+			"type":     "response.completed",
+			"response": data,
+		})
+		if err != nil {
+			return body
+		}
+		return wrapped
+	}
+	return body
 }
 
 func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *keys.Manager,
@@ -314,10 +474,15 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *k
 	// Back-translate response when formats differ (upstream → client).
 	outBody := respBody
 	if httpOK && upstreamAPIFormat != clientAPIFormat {
+		// Normalize non-standard reasoning field variants before translation.
+		translationInput := respBody
+		if upstreamAPIFormat == "openai" {
+			translationInput = normalizeOpenAIReasoningField(translationInput)
+		}
 		var param any
 		if translated := translate.TranslateResponseNonStream(
 			req.Context(), clientAPIFormat, upstreamAPIFormat, model,
-			originalClientBody, body, respBody, &param,
+			originalClientBody, body, translationInput, &param,
 		); len(translated) > 0 {
 			outBody = translated
 		}
@@ -506,7 +671,54 @@ func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http
 	return h
 }
 
-// appendGeminiKey appends the ?key= (or &key=) query parameter to a Gemini URL.
+// normalizeOpenAIReasoningField maps non-standard reasoning field names to the
+// de-facto "reasoning_content" convention used by DeepSeek and CLIProxyAPI.
+//
+// Known variants:
+//   - "reasoning"  (sensenova, some other providers)
+//   → "reasoning_content"  (DeepSeek / CLIProxyAPI standard)
+//
+// Handles both non-stream (choices[].message) and stream (choices[].delta).
+func normalizeOpenAIReasoningField(body []byte) []byte {
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+	choices, _ := data["choices"].([]any)
+	if len(choices) == 0 {
+		return body
+	}
+	changed := false
+	for _, c := range choices {
+		cm, _ := c.(map[string]any)
+		if cm == nil {
+			continue
+		}
+		// Non-stream: choices[].message
+		// Stream: choices[].delta
+		for _, key := range []string{"message", "delta"} {
+			msg, _ := cm[key].(map[string]any)
+			if msg == nil {
+				continue
+			}
+			if r, ok := msg["reasoning"]; ok {
+				if _, hasRC := msg["reasoning_content"]; !hasRC {
+					msg["reasoning_content"] = r
+					delete(msg, "reasoning")
+					changed = true
+				}
+			}
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return out
+}
 func appendGeminiKey(rawURL, apiKey string) string {
 	if apiKey == "" {
 		return rawURL
@@ -525,6 +737,35 @@ func stripModelField(body []byte) []byte {
 		return body
 	}
 	delete(data, "model")
+	out, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// ensureGeminiIncludeThoughts adds includeThoughts:true to generationConfig.thinkingConfig
+// when thinkingConfig is present, so Gemini returns thought parts in the response.
+func ensureGeminiIncludeThoughts(body []byte) []byte {
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+	gc, _ := data["generationConfig"].(map[string]any)
+	if gc == nil {
+		return body
+	}
+	tc, _ := gc["thinkingConfig"].(map[string]any)
+	if tc == nil {
+		return body
+	}
+	// Already set — don't override.
+	if _, ok := tc["includeThoughts"]; ok {
+		return body
+	}
+	tc["includeThoughts"] = true
+	gc["thinkingConfig"] = tc
+	data["generationConfig"] = gc
 	out, err := json.Marshal(data)
 	if err != nil {
 		return body

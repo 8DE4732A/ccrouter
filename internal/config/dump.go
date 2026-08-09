@@ -8,6 +8,28 @@ import (
 
 // Dump serializes an AppConfig to a plain map suitable for JSON/yaml output.
 func Dump(cfg *AppConfig) map[string]any {
+	// General config (api_keys + proxy)
+	general := map[string]any{}
+	if len(cfg.General.APIKeys) > 0 {
+		apiKeys := make([]any, 0, len(cfg.General.APIKeys))
+		for _, k := range cfg.General.APIKeys {
+			apiKeys = append(apiKeys, map[string]any{"key": k.Key})
+		}
+		general["api_keys"] = apiKeys
+	}
+	if cfg.General.Proxy != nil {
+		proxy := map[string]any{}
+		if cfg.General.Proxy.URL != "" {
+			proxy["url"] = cfg.General.Proxy.URL
+		}
+		if cfg.General.Proxy.Disabled {
+			proxy["disabled"] = true
+		}
+		if len(proxy) > 0 {
+			general["proxy"] = proxy
+		}
+	}
+
 	providers := make([]any, 0, len(cfg.Providers))
 	for _, p := range cfg.Providers {
 		apis := make([]any, 0, len(p.APIs))
@@ -37,21 +59,39 @@ func Dump(cfg *AppConfig) map[string]any {
 				"models":           models,
 			})
 		}
-		providers = append(providers, map[string]any{
+		pm := map[string]any{
 			"name":               p.Name,
 			"api":                apis,
 			"max_retries":        p.MaxRetries,
 			"key_strategy":       p.KeyStrategy,
 			"keys":               keys,
 			"health_check_rules": rules,
-		})
+		}
+		// Per-provider proxy override.
+		if p.Proxy != nil {
+			pp := map[string]any{}
+			if p.Proxy.URL != "" {
+				pp["url"] = p.Proxy.URL
+			}
+			if p.Proxy.Disabled {
+				pp["disabled"] = true
+			}
+			if len(pp) > 0 {
+				pm["proxy"] = pp
+			}
+		}
+		providers = append(providers, pm)
 	}
 
 	combos := make([]any, 0, len(cfg.Combos))
 	for _, c := range cfg.Combos {
 		members := make([]any, 0, len(c.Members))
 		for _, m := range c.Members {
-			members = append(members, map[string]any{"provider": m.Provider, "model": m.Model})
+			mm := map[string]any{"provider": m.Provider, "model": m.Model}
+			if m.UpstreamAPIFormat != "" {
+				mm["upstream_api_format"] = m.UpstreamAPIFormat
+			}
+			members = append(members, mm)
 		}
 		combo := map[string]any{
 			"name":       c.Name,
@@ -78,12 +118,16 @@ func Dump(cfg *AppConfig) map[string]any {
 		})
 	}
 
-	return map[string]any{
+	out := map[string]any{
 		"providers":       providers,
 		"combos":          combos,
 		"verbose_logging": cfg.VerboseLogging,
 		"payload_scripts": scripts,
 	}
+	if len(general) > 0 {
+		out["general"] = general
+	}
+	return out
 }
 
 // ToYAML serializes an AppConfig to YAML text (used for atomic config write).
