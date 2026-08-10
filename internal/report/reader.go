@@ -74,8 +74,8 @@ func boolFrom(v any) bool {
 }
 
 // iterAllReversed yields records newest-to-oldest across:
-//  1. the active chunked segment + its rotated backups (requests.log,
-//     requests.log.1 .. N), and then
+//  1. the active chunked segment + its rotated backups (requests.zrc,
+//     requests.zrc.1 .. N), and then
 //  2. any legacy plain-JSONL segments left over from before the chunked
 //     format was introduced (requests.jsonl, requests.jsonl.1.gz .. N.gz).
 //

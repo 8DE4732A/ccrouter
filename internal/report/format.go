@@ -13,7 +13,7 @@ import (
 // On-disk chunk format
 // ---------------------------------------------------------------------------
 //
-// A "segment" file (the active requests.log, or a rotated requests.log.N) is
+// A "segment" file (the active requests.zrc, or a rotated requests.zrc.N) is
 // a flat, append-only sequence of self-contained "chunks":
 //
 //	Magic(4B) | FirstTS(8B f64) | LastTS(8B f64) | RecordCount(4B u32) |

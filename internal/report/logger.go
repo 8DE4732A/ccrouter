@@ -12,7 +12,7 @@ import (
 const (
 	defaultMaxBytes  = 20 * 1024 * 1024 // 20 MB per segment before rotation
 	defaultBackupCnt = 10
-	segmentFilename  = "requests.log" // new chunked/zstd format
+	segmentFilename  = "requests.zrc" // new chunked/zstd format
 
 	// batchMaxRecords / batchMaxWait bound how long a record can sit in
 	// memory before being flushed to disk as part of a chunk. Batching is
@@ -51,7 +51,7 @@ type Logger struct {
 	written int
 }
 
-// New creates a Logger writing to logDir/requests.log.
+// New creates a Logger writing to logDir/requests.zrc.
 func New(logDir string) (*Logger, error) {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, err
@@ -207,7 +207,7 @@ func tsOf(rec map[string]any) float64 {
 	return 0
 }
 
-// rotate closes the active segment, shifts requests.log.1..N up by one
+// rotate closes the active segment, shifts requests.zrc.1..N up by one
 // (dropping the oldest beyond backupCount), and starts a fresh active
 // segment. Because every segment's first chunk is a checkpoint (no
 // dictionary dependency on any other segment), this is a plain rename/delete
