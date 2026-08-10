@@ -1,48 +1,69 @@
 package report
 
 import (
-	"bufio"
-	"compress/gzip"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 )
 
 const (
-	defaultMaxBytes  = 20 * 1024 * 1024 // 20 MB
+	defaultMaxBytes  = 20 * 1024 * 1024 // 20 MB per segment before rotation
 	defaultBackupCnt = 10
-	logFilename      = "requests.jsonl"
+	segmentFilename  = "requests.log" // new chunked/zstd format
+
+	// batchMaxRecords / batchMaxWait bound how long a record can sit in
+	// memory before being flushed to disk as part of a chunk. Batching is
+	// what lets consecutive records share a dictionary (see format.go); the
+	// trade-off is that a crash can lose up to one batch's worth of records
+	// that were queued but not yet flushed. Capping the wait at a couple of
+	// seconds keeps that exposure small.
+	batchMaxRecords = 10
+	batchMaxWait    = 2 * time.Second
 )
 
-// Logger writes detailed request records as JSONL with size-based rotation.
-// Records include full upstream headers which may contain plaintext API keys.
+// Logger writes detailed request records as JSONL, compressed with chained
+// zstd dictionaries and rotated by size. Records include full upstream
+// headers, which may contain plaintext API keys — the underlying files
+// should be treated the same as secrets.
+//
+// See format.go for the on-disk chunk format, the dictionary-chaining
+// strategy, and the reasoning behind the chosen compression level.
 type Logger struct {
 	logDir      string
 	maxBytes    int64
 	backupCount int
 	active      string
-	fh          *os.File
-	records     chan map[string]any
-	dropped     int
-	mu          sync.Mutex
-	done        chan struct{}
-	wg          sync.WaitGroup
-	queued      int
-	written     int
+
+	fh                    *os.File
+	fileSize              int64  // current size of the active segment file
+	prevRaw               []byte // raw content of the last chunk written to the active segment, for dict chaining
+	chunksSinceCheckpoint int
+
+	records chan map[string]any
+	dropped int
+	mu      sync.Mutex
+	done    chan struct{}
+	wg      sync.WaitGroup
+	queued  int
+	written int
 }
 
-// New creates a Logger writing to logDir/requests.jsonl.
+// New creates a Logger writing to logDir/requests.log.
 func New(logDir string) (*Logger, error) {
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		return nil, err
 	}
-	active := filepath.Join(logDir, logFilename)
+	active := filepath.Join(logDir, segmentFilename)
 	fh, err := os.OpenFile(active, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
+		return nil, err
+	}
+	st, err := fh.Stat()
+	if err != nil {
+		fh.Close()
 		return nil, err
 	}
 	l := &Logger{
@@ -51,6 +72,7 @@ func New(logDir string) (*Logger, error) {
 		backupCount: defaultBackupCnt,
 		active:      active,
 		fh:          fh,
+		fileSize:    st.Size(),
 		records:     make(chan map[string]any, 10000),
 		done:        make(chan struct{}),
 	}
@@ -59,18 +81,54 @@ func New(logDir string) (*Logger, error) {
 	return l, nil
 }
 
+// run is the background writer goroutine. It batches records into chunks of
+// up to batchMaxRecords, flushing early if batchMaxWait elapses since the
+// first record in the current batch arrived — so a chunk is written promptly
+// even during quiet periods, bounding the data-loss window on crash.
 func (l *Logger) run() {
 	defer l.wg.Done()
+	batch := make([]map[string]any, 0, batchMaxRecords)
+	timer := time.NewTimer(batchMaxWait)
+	timer.Stop()
+	timerActive := false
+
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		l.writeBatch(batch)
+		batch = batch[:0]
+		if timerActive {
+			timer.Stop()
+			timerActive = false
+		}
+	}
+
 	for {
 		select {
 		case rec := <-l.records:
-			l.write(rec)
+			batch = append(batch, rec)
+			if !timerActive {
+				timer.Reset(batchMaxWait)
+				timerActive = true
+			}
+			if len(batch) >= batchMaxRecords {
+				flush()
+			}
+		case <-timer.C:
+			timerActive = false
+			flush()
 		case <-l.done:
+			// Drain whatever is still queued, then do a final flush.
 			for {
 				select {
 				case rec := <-l.records:
-					l.write(rec)
+					batch = append(batch, rec)
+					if len(batch) >= batchMaxRecords {
+						flush()
+					}
 				default:
+					flush()
 					return
 				}
 			}
@@ -78,63 +136,107 @@ func (l *Logger) run() {
 	}
 }
 
-func (l *Logger) write(rec map[string]any) {
-	data, err := json.Marshal(rec)
-	if err != nil {
+// writeBatch compresses and appends one chunk containing all of batch's
+// records, then rotates the segment if it has grown past maxBytes.
+func (l *Logger) writeBatch(batch []map[string]any) {
+	var raw []byte
+	firstTS, lastTS := 0.0, 0.0
+	n := 0
+	for _, rec := range batch {
+		data, err := json.Marshal(rec)
+		if err != nil {
+			continue
+		}
+		raw = append(raw, data...)
+		raw = append(raw, '\n')
+		ts := tsOf(rec)
+		if n == 0 {
+			firstTS = ts
+		}
+		lastTS = ts
+		n++
+	}
+
+	if n == 0 {
 		l.mu.Lock()
-		l.written++
+		l.written += len(batch)
 		l.mu.Unlock()
 		return
 	}
-	line := append(data, '\n')
-	if _, err := l.fh.Write(line); err != nil {
+
+	checkpoint := l.prevRaw == nil || l.chunksSinceCheckpoint >= checkpointInterval
+	chunk, err := encodeChunk(raw, n, firstTS, lastTS, l.prevRaw, checkpoint)
+	if err != nil {
 		l.mu.Lock()
-		l.written++
+		l.written += len(batch)
+		l.mu.Unlock()
+		return
+	}
+	if _, err := l.fh.Write(chunk); err != nil {
+		l.mu.Lock()
+		l.written += len(batch)
 		l.mu.Unlock()
 		return
 	}
 	_ = l.fh.Sync()
+
+	l.fileSize += int64(len(chunk))
+	l.prevRaw = raw
+	if checkpoint {
+		l.chunksSinceCheckpoint = 1
+	} else {
+		l.chunksSinceCheckpoint++
+	}
+
+	// Mark records as durably written only after the chunk has been fully
+	// flushed to disk, so Flush() callers can rely on Read()/ReadOne() seeing
+	// them immediately afterward.
 	l.mu.Lock()
-	l.written++
+	l.written += len(batch)
 	l.mu.Unlock()
-	st, err := os.Stat(l.active)
-	if err == nil && st.Size() >= l.maxBytes {
+
+	if l.fileSize >= l.maxBytes {
 		l.rotate()
 	}
 }
 
+func tsOf(rec map[string]any) float64 {
+	if v, ok := rec["ts"].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+// rotate closes the active segment, shifts requests.log.1..N up by one
+// (dropping the oldest beyond backupCount), and starts a fresh active
+// segment. Because every segment's first chunk is a checkpoint (no
+// dictionary dependency on any other segment), this is a plain rename/delete
+// dance — no re-compression of old data is needed.
 func (l *Logger) rotate() {
-	// close active file
 	_ = l.fh.Close()
 
-	oldest := filepath.Join(l.logDir, logFilename+"."+strconv.Itoa(l.backupCount)+".gz")
+	oldest := filepath.Join(l.logDir, segmentFilename+"."+strconv.Itoa(l.backupCount))
 	_ = os.Remove(oldest)
 
 	for i := l.backupCount - 1; i >= 1; i-- {
-		src := filepath.Join(l.logDir, logFilename+"."+strconv.Itoa(i)+".gz")
-		dst := filepath.Join(l.logDir, logFilename+"."+strconv.Itoa(i+1)+".gz")
+		src := filepath.Join(l.logDir, segmentFilename+"."+strconv.Itoa(i))
+		dst := filepath.Join(l.logDir, segmentFilename+"."+strconv.Itoa(i+1))
 		if _, err := os.Stat(src); err == nil {
 			_ = os.Rename(src, dst)
 		}
 	}
 
-	archive := filepath.Join(l.logDir, logFilename+".1.gz")
-	if fin, err := os.Open(l.active); err == nil {
-		if fout, gerr := os.Create(archive); gerr == nil {
-			gz := gzip.NewWriter(fout)
-			_, _ = bufio.NewReader(fin).WriteTo(gz)
-			_ = gz.Close()
-			_ = fout.Close()
-		}
-		_ = fin.Close()
-	}
+	archive := filepath.Join(l.logDir, segmentFilename+".1")
+	_ = os.Rename(l.active, archive)
 
 	fh, err := os.OpenFile(l.active, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
-		// recover by reopening append
 		fh, _ = os.OpenFile(l.active, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	}
 	l.fh = fh
+	l.fileSize = 0
+	l.prevRaw = nil
+	l.chunksSinceCheckpoint = 0
 }
 
 // Log enqueues a record for writing (non-blocking).
@@ -174,147 +276,8 @@ func (l *Logger) DroppedCount() int {
 	return l.dropped
 }
 
-// Read returns up to limit metadata-only records starting at offset, newest first.
-// The request/response detail fields are stripped — use ReadOne to fetch a single full record.
-func (l *Logger) Read(limit, offset int, success *bool) (map[string]any, error) {
-	need := limit + 1
-	collected := []map[string]any{}
-	skipped := 0
-
-	for rec := range l.iterFiles() {
-		if success != nil && (rec["success"] != nil && boolFrom(rec["success"]) != *success) {
-			continue
-		}
-		if skipped < offset {
-			skipped++
-			continue
-		}
-		collected = append(collected, stripDetail(rec))
-		if len(collected) >= need {
-			break
-		}
-	}
-	hasMore := len(collected) > limit
-	return map[string]any{"items": collected[:min(limit, len(collected))], "has_more": hasMore}, nil
-}
-
-// ReadOne returns the single full record whose ts matches, or nil if not found.
-func (l *Logger) ReadOne(ts float64) (map[string]any, error) {
-	for rec := range l.iterFiles() {
-		if tsVal, ok := rec["ts"].(float64); ok && tsVal == ts {
-			return rec, nil
-		}
-	}
-	return nil, nil
-}
-
-// stripDetail removes the large request/response body fields for list views.
-func stripDetail(rec map[string]any) map[string]any {
-	out := make(map[string]any, len(rec))
-	for k, v := range rec {
-		if k == "request" || k == "response" {
-			continue
-		}
-		out[k] = v
-	}
-	return out
-}
-
-func boolFrom(v any) bool {
-	switch t := v.(type) {
-	case bool:
-		return t
-	case float64:
-		return t != 0
-	}
-	return false
-}
-
-// iterFiles yields records newest-to-oldest across active + rotating archives.
-func (l *Logger) iterFiles() <-chan map[string]any {
-	ch := make(chan map[string]any)
-	go func() {
-		defer close(ch)
-		if _, err := os.Stat(l.active); err == nil {
-			for rec := range readFileReversed(l.active) {
-				ch <- rec
-			}
-		}
-		for i := 1; i <= l.backupCount; i++ {
-			archive := filepath.Join(l.logDir, logFilename+"."+strconv.Itoa(i)+".gz")
-			if _, err := os.Stat(archive); err != nil {
-				break
-			}
-			for rec := range readGzipReversed(archive) {
-				ch <- rec
-			}
-		}
-	}()
-	return ch
-}
-
-func readFileReversed(path string) <-chan map[string]any {
-	ch := make(chan map[string]any)
-	go func() {
-		defer close(ch)
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return
-		}
-		lines := strings.Split(string(data), "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			line := strings.TrimSpace(lines[i])
-			if line == "" {
-				continue
-			}
-			var rec map[string]any
-			if err := json.Unmarshal([]byte(line), &rec); err == nil {
-				ch <- rec
-			}
-		}
-	}()
-	return ch
-}
-
-func readGzipReversed(path string) <-chan map[string]any {
-	ch := make(chan map[string]any)
-	go func() {
-		defer close(ch)
-		f, err := os.Open(path)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-		gr, err := gzip.NewReader(f)
-		if err != nil {
-			return
-		}
-		defer gr.Close()
-		var data []byte
-		buf := make([]byte, 1<<16)
-		for {
-			n, err := gr.Read(buf)
-			data = append(data, buf[:n]...)
-			if err != nil {
-				break
-			}
-		}
-		lines := strings.Split(string(data), "\n")
-		for i := len(lines) - 1; i >= 0; i-- {
-			line := strings.TrimSpace(lines[i])
-			if line == "" {
-				continue
-			}
-			var rec map[string]any
-			if err := json.Unmarshal([]byte(line), &rec); err == nil {
-				ch <- rec
-			}
-		}
-	}()
-	return ch
-}
-
-// Close flushes the queue and closes the file.
+// Close flushes the queue (forcing a final partial-batch write) and closes
+// the active file.
 func (l *Logger) Close() {
 	close(l.done)
 	l.wg.Wait()
