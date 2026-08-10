@@ -29,6 +29,11 @@ func Dump(cfg *AppConfig) map[string]any {
 			general["proxy"] = proxy
 		}
 	}
+	if cfg.General.RequestTimeoutSeconds == RequestTimeoutDisabled {
+		general["request_timeout_seconds"] = 0
+	} else if cfg.General.RequestTimeoutSeconds > 0 {
+		general["request_timeout_seconds"] = cfg.General.RequestTimeoutSeconds
+	}
 
 	providers := make([]any, 0, len(cfg.Providers))
 	for _, p := range cfg.Providers {
@@ -49,7 +54,7 @@ func Dump(cfg *AppConfig) map[string]any {
 			for i := range r.Models {
 				models[i] = r.Models[i]
 			}
-			rules = append(rules, map[string]any{
+			ruleMap := map[string]any{
 				"description":      r.Description,
 				"jsonpath":         r.JSONPath,
 				"match_value":      r.MatchValue,
@@ -57,7 +62,15 @@ func Dump(cfg *AppConfig) map[string]any {
 				"action":           r.Action,
 				"cooldown_seconds": r.CooldownSeconds,
 				"models":           models,
-			})
+			}
+			if len(r.HTTPStatusCodes) > 0 {
+				codes := make([]any, len(r.HTTPStatusCodes))
+				for i, c := range r.HTTPStatusCodes {
+					codes[i] = c
+				}
+				ruleMap["http_status_codes"] = codes
+			}
+			rules = append(rules, ruleMap)
 		}
 		pm := map[string]any{
 			"name":               p.Name,

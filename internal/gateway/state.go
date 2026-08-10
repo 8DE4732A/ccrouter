@@ -45,9 +45,16 @@ func New(cfg *config.AppConfig, configPath string, rec *db.Recorder, rl *report.
 	}, nil
 }
 
+// defaultRequestTimeout is the upstream request timeout when none is configured.
+const defaultRequestTimeout = 10 * time.Minute
+
 // buildProxyClient creates an http.Client for a provider, applying proxy settings.
 // Priority: provider.Proxy > global proxy.
-func buildProxyClient(globalProxy *config.ProxyConfig, providerProxy *config.ProxyConfig) *http.Client {
+// timeout is the total request timeout to set on the client. A value of 0 means
+// "no timeout" (http.Client's own zero-value semantics) — the caller is
+// responsible for resolving the configured/default timeout before calling this
+// function; buildProxyClient does not apply any implicit default.
+func buildProxyClient(globalProxy *config.ProxyConfig, providerProxy *config.ProxyConfig, timeout time.Duration) *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil // no proxy by default
 
@@ -56,7 +63,7 @@ func buildProxyClient(globalProxy *config.ProxyConfig, providerProxy *config.Pro
 	if providerProxy != nil {
 		if providerProxy.Disabled {
 			// Provider explicitly opts out — use no proxy.
-			return &http.Client{Transport: transport, Timeout: 120 * time.Second}
+			return &http.Client{Transport: transport, Timeout: timeout}
 		}
 		if providerProxy.URL != "" {
 			effective = providerProxy
@@ -66,12 +73,12 @@ func buildProxyClient(globalProxy *config.ProxyConfig, providerProxy *config.Pro
 		effective = globalProxy
 	}
 	if effective == nil {
-		return &http.Client{Transport: transport, Timeout: 120 * time.Second}
+		return &http.Client{Transport: transport, Timeout: timeout}
 	}
 
 	proxyURL, err := url.Parse(effective.URL)
 	if err != nil {
-		return &http.Client{Transport: transport, Timeout: 120 * time.Second}
+		return &http.Client{Transport: transport, Timeout: timeout}
 	}
 
 	switch proxyURL.Scheme {
@@ -102,17 +109,29 @@ func buildProxyClient(globalProxy *config.ProxyConfig, providerProxy *config.Pro
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
-	return &http.Client{Transport: transport, Timeout: 120 * time.Second}
+	return &http.Client{Transport: transport, Timeout: timeout}
 }
 
 func buildService(cfg *config.AppConfig, prevKMs map[string]*keys.Manager,
 	rec *db.Recorder, rl *report.Logger) (*proxyPkg.Service, error) {
 
+	// Resolve timeout from config:
+	//   0 (field omitted)                         -> defaultRequestTimeout (10 min)
+	//   config.RequestTimeoutDisabled (explicit 0) -> 0 (no timeout)
+	//   positive N                                 -> N seconds
+	timeout := defaultRequestTimeout
+	switch {
+	case cfg.General.RequestTimeoutSeconds == config.RequestTimeoutDisabled:
+		timeout = 0
+	case cfg.General.RequestTimeoutSeconds > 0:
+		timeout = time.Duration(cfg.General.RequestTimeoutSeconds) * time.Second
+	}
+
 	// Build per-provider clients with proxy settings.
 	providerClients := make(map[string]*http.Client, len(cfg.Providers))
 	for i := range cfg.Providers {
 		p := &cfg.Providers[i]
-		providerClients[p.Name] = buildProxyClient(cfg.General.Proxy, p.Proxy)
+		providerClients[p.Name] = buildProxyClient(cfg.General.Proxy, p.Proxy, timeout)
 	}
 
 	kms := make(map[string]*keys.Manager, len(cfg.Providers))

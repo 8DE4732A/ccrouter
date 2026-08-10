@@ -133,6 +133,23 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 				Disabled: toBool(pm["disabled"]),
 			}
 		}
+		// request_timeout_seconds: total per-request timeout, in seconds.
+		//   - field omitted            -> RequestTimeoutSeconds stays 0, runtime default (600s) applies.
+		//   - explicit 0               -> disables the timeout entirely (waits indefinitely); stored
+		//                                 as the sentinel -1 internally to distinguish from "omitted".
+		//   - explicit positive value  -> used as-is.
+		//   - explicit negative value  -> rejected.
+		if tv, ok := gm["request_timeout_seconds"]; ok {
+			timeout := intDefault(tv, 600)
+			if timeout < 0 {
+				return nil, errf("'general.request_timeout_seconds' must be >= 0, got %d", timeout)
+			}
+			if timeout == 0 {
+				cfg.General.RequestTimeoutSeconds = RequestTimeoutDisabled
+			} else {
+				cfg.General.RequestTimeoutSeconds = timeout
+			}
+		}
 	}
 
 	// ---- verbose_logging ----
@@ -190,7 +207,7 @@ func buildProvider(p map[string]any, idx int) (*ProviderConfig, error) {
 		}
 		af := lower(strVal(em["api_format"]))
 		if !validAPIFormats[af] {
-			return nil, errf("providers[%d].api[%d].api_format must be one of: openai, anthropic, openai-responses, openai-images", idx, k)
+			return nil, errf("providers[%d].api[%d].api_format must be one of: openai, anthropic, openai-responses, openai-images, gemini", idx, k)
 		}
 		if seenFormats[af] {
 			return nil, errf("providers[%d].api: duplicate api_format %q", idx, af)
@@ -275,6 +292,23 @@ func buildRule(rm map[string]any, ctx string) (*HealthCheckRule, error) {
 	if action != "rotate" {
 		return nil, errf("%s.action must be 'rotate', got %q", ctx, action)
 	}
+
+	// http_status_codes: optional list of HTTP status codes to match.
+	httpStatusCodes := []int{}
+	if v, ok := rm["http_status_codes"]; ok && v != nil {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, errf("%s.http_status_codes must be a list of integers", ctx)
+		}
+		for i, cv := range arr {
+			code := intDefault(cv, 0)
+			if code < 100 || code > 599 {
+				return nil, errf("%s.http_status_codes[%d] must be a valid HTTP status code (100-599), got %v", ctx, i, cv)
+			}
+			httpStatusCodes = append(httpStatusCodes, code)
+		}
+	}
+
 	matchType := lower(strVal(rm["match_type"]))
 	if matchType == "" {
 		matchType = "equals"
@@ -283,7 +317,7 @@ func buildRule(rm map[string]any, ctx string) (*HealthCheckRule, error) {
 		return nil, errf("%s.match_type must be one of: equals, contains, regex", ctx)
 	}
 	matchValue := strVal(rm["match_value"])
-	if matchValue == "" {
+	if matchValue == "" && len(httpStatusCodes) == 0 {
 		matchValue = "quota_exceeded_error"
 	}
 	cooldown := intDefault(rm["cooldown_seconds"], 60)
@@ -314,14 +348,20 @@ func buildRule(rm map[string]any, ctx string) (*HealthCheckRule, error) {
 		}
 	}
 
+	jsonPath := strVal(rm["jsonpath"])
+	if jsonPath == "" && len(httpStatusCodes) == 0 {
+		jsonPath = "$.error.type" // default for backward compatibility
+	}
+
 	return &HealthCheckRule{
 		Description:     strVal(rm["description"]),
-		JSONPath:        stringDefault(strVal(rm["jsonpath"]), "$.error.type"),
+		JSONPath:        jsonPath,
 		MatchValue:      matchValue,
 		MatchType:       matchType,
 		Action:          action,
 		CooldownSeconds: cooldown,
 		Models:          models,
+		HTTPStatusCodes: httpStatusCodes,
 		regex:           compiled,
 	}, nil
 }

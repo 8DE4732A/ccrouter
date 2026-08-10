@@ -28,6 +28,7 @@ export type APIKeyEntry = {
 export type GeneralConfig = {
   api_keys?: APIKeyEntry[]
   proxy?: ProxyConfig
+  request_timeout_seconds?: number  // upstream request timeout in seconds, default 600 (10min)
 }
 
 export type HealthCheckRule = {
@@ -38,6 +39,7 @@ export type HealthCheckRule = {
   action: string
   cooldown_seconds: number
   models: string[]
+  http_status_codes?: number[]
 }
 
 export type KeyConfig = { key: string }

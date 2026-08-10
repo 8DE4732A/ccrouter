@@ -57,9 +57,12 @@ func NeedTranslate(clientFmt, upstreamFmt string) bool {
 	if clientFmt == upstreamFmt {
 		return false
 	}
-	from := toClientSDKFormat(clientFmt)
-	to := toUpstreamSDKFormat(upstreamFmt)
-	return sdkt.HasRequestTransformer(from, to) || sdkt.HasResponseTransformer(from, to)
+	clientSDK := toClientSDKFormat(clientFmt)
+	upstreamSDK := toUpstreamSDKFormat(upstreamFmt)
+	// Request translation:  clientFmt → upstreamFmt  =>  HasRequestTransformer(clientSDK, upstreamSDK)
+	// Response translation: upstreamFmt → clientFmt  =>  HasResponseTransformer(upstreamSDK, clientSDK)
+	return sdkt.HasRequestTransformer(clientSDK, upstreamSDK) ||
+		sdkt.HasResponseTransformer(upstreamSDK, clientSDK)
 }
 
 // TranslateRequest converts a raw JSON request body from clientFmt to upstreamFmt.

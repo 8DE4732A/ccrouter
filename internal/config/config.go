@@ -27,7 +27,20 @@ type GeneralConfig struct {
 	// Proxy is the global outbound proxy used for all upstream requests unless
 	// a provider overrides it with its own proxy setting.
 	Proxy *ProxyConfig `json:"proxy,omitempty" yaml:"proxy,omitempty"`
+
+	// RequestTimeoutSeconds is the total timeout for each upstream request, in seconds.
+	// Default is 600 (10 minutes) when 0 (field omitted from config). Applies to both
+	// streaming and non-streaming requests.
+	//
+	// The value RequestTimeoutDisabled (-1) means "no timeout" — this is the internal
+	// representation of an explicit `request_timeout_seconds: 0` in the YAML/JSON config,
+	// distinguishing "user explicitly disabled the timeout" from "field omitted".
+	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty" yaml:"request_timeout_seconds,omitempty"`
 }
+
+// RequestTimeoutDisabled is the sentinel value for GeneralConfig.RequestTimeoutSeconds
+// meaning the upstream request timeout is disabled (wait indefinitely).
+const RequestTimeoutDisabled = -1
 
 // validClientFormats are formats the proxy exposes to clients (server routes exist for each).
 var validClientFormats = map[string]bool{
@@ -72,6 +85,9 @@ type HealthCheckRule struct {
 	Action          string   `json:"action" yaml:"action"`
 	CooldownSeconds int      `json:"cooldown_seconds" yaml:"cooldown_seconds"`
 	Models          []string `json:"models" yaml:"models"`
+	// HTTPStatusCodes triggers the rule when the upstream HTTP status code
+	// matches any code in this list. When set, jsonpath/match_value are optional.
+	HTTPStatusCodes []int `json:"http_status_codes,omitempty" yaml:"http_status_codes,omitempty"`
 
 	// Compiled regex for match_type == "regex" (not serialized).
 	regex *regexp.Regexp `json:"-" yaml:"-"`

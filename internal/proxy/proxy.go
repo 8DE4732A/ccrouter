@@ -105,9 +105,13 @@ func New(cfg *config.AppConfig, kms map[string]*keys.Manager, router *combos.Rou
 		s.providers[p.Name] = p
 		for j := range p.HealthCheckRules {
 			r := &p.HealthCheckRules[j]
-			expr, err := compileJSONPath(r.JSONPath)
-			if err != nil {
-				return nil, fmt.Errorf("invalid jsonpath %q in provider %q: %v", r.JSONPath, p.Name, err)
+			var expr jsonPathExpr
+			if r.JSONPath != "" {
+				var err error
+				expr, err = compileJSONPath(r.JSONPath)
+				if err != nil {
+					return nil, fmt.Errorf("invalid jsonpath %q in provider %q: %v", r.JSONPath, p.Name, err)
+				}
 			}
 			s.providerRules[p.Name] = append(s.providerRules[p.Name], compiledRule{expr: expr, rule: r})
 		}
@@ -185,6 +189,13 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		upstreamBody := clientBody
 		var translationTag string // e.g. "anthropic→openai", appended to matched_payload
 		if upstreamFmt != apiFormat {
+			// Verify the translator actually supports this format pair. If not, the
+			// request would silently pass through in the wrong format — fail fast.
+			if !translate.NeedTranslate(apiFormat, upstreamFmt) {
+				jsonError(w, 502, fmt.Sprintf("no translator available for %s -> %s (client format %q, upstream format %q)",
+					apiFormat, upstreamFmt, apiFormat, upstreamFmt), "proxy_error")
+				return
+			}
 			upstreamBody = translate.TranslateRequest(apiFormat, upstreamFmt, model, clientBody, isStream)
 			translationTag = apiFormat + "→" + upstreamFmt
 		}
@@ -278,7 +289,7 @@ func (s *Service) attempt(w http.ResponseWriter, r *http.Request, t0 time.Time, 
 	if upstreamAPIFormat == "openai-responses" {
 		return s.attemptNonStreamingViaSSE(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
 	}
-	return s.attemptNonStreaming(w, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
+	return s.attemptNonStreaming(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
 }
 
 // attemptNonStreamingViaSSE handles upstreams that always return SSE (e.g. openai-responses)
@@ -313,16 +324,26 @@ func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Reque
 	rawBody, _ := io.ReadAll(resp.Body)
 
 	if !httpOK {
-		matched := s.matchRotationRules(rawBody, providerName, model)
+		matched := s.matchRotationRules(rawBody, providerName, model, statusCode)
 		if matched != nil {
 			return false, matched
 		}
 		usage := map[string]any{}
 		errText := extractErrorText(rawBody)
 		s.record(combo, providerName, model, key, clientAPIFormat, false, &statusCode, false, "", usage, t0, &errText, &matchedPayload)
+		// For error responses, don't run the upstream→client translator: format
+		// translators are built for success-shaped bodies (e.g. openai "choices" or
+		// codex "response.completed") and, given an error body, may silently return
+		// a well-formed but semantically empty payload (empty content, null stop
+		// reason) instead of failing — which would hide the real error from the
+		// client. Always construct the error directly in the client's format instead.
+		outBody := rawBody
+		if upstreamAPIFormat != clientAPIFormat {
+			outBody = buildErrorBody(clientAPIFormat, statusCode, errText)
+		}
 		copyResponseHeader(w, resp.Header)
 		w.WriteHeader(statusCode)
-		_, _ = w.Write(rawBody)
+		_, _ = w.Write(outBody)
 		return true, nil
 	}
 
@@ -374,7 +395,7 @@ func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Reque
 }
 
 // extractSSECompletedEvent scans raw SSE bytes and returns the JSON body of the
-// last response.completed (or response.incomplete) event, or nil if not found.
+// last response.completed, response.incomplete, or response.failed event, or nil if not found.
 func extractSSECompletedEvent(sseBody []byte) []byte {
 	var last []byte
 	for _, line := range strings.Split(string(sseBody), "\n") {
@@ -386,7 +407,13 @@ func extractSSECompletedEvent(sseBody []byte) []byte {
 		if data == "[DONE]" || data == "" {
 			continue
 		}
-		if strings.Contains(data, `"response.completed"`) || strings.Contains(data, `"response.incomplete"`) {
+		var event struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal([]byte(data), &event); err != nil {
+			continue
+		}
+		if event.Type == "response.completed" || event.Type == "response.incomplete" || event.Type == "response.failed" {
 			last = []byte(data)
 		}
 	}
@@ -432,7 +459,7 @@ func wrapResponseCompletedIfNeeded(body []byte) []byte {
 	return body
 }
 
-func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *keys.Manager,
+func (s *Service) attemptNonStreaming(w http.ResponseWriter, r *http.Request, t0 time.Time, km *keys.Manager,
 	targetURL string, headers http.Header, body []byte, providerName, model, combo, key,
 	clientAPIFormat, upstreamAPIFormat, matchedPayload string,
 	originalClientBody []byte,
@@ -443,7 +470,7 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *k
 	if upstreamAPIFormat == "gemini" {
 		upstreamURL = appendGeminiKey(targetURL, key)
 	}
-	req, err := http.NewRequest("POST", upstreamURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		jsonError(w, 500, fmt.Sprintf("failed to build upstream request: %v", err), "proxy_error")
 		return true, nil
@@ -457,13 +484,13 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *k
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
+	statusCode := resp.StatusCode
 
-	matched := s.matchRotationRules(respBody, providerName, model)
+	matched := s.matchRotationRules(respBody, providerName, model, statusCode)
 	if matched != nil {
 		return false, matched
 	}
 
-	statusCode := resp.StatusCode
 	httpOK := statusCode < 400
 
 	// Extract usage from the original upstream response before any translation.
@@ -478,19 +505,32 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, t0 time.Time, km *k
 	}
 
 	// Back-translate response when formats differ (upstream → client).
+	//
+	// For error responses (non-httpOK), skip the upstream→client translator and
+	// build the error directly in the client's format instead. Format translators
+	// are written for success-shaped bodies (e.g. openai "choices" or codex
+	// "response.completed") and, given an error body, may silently return a
+	// well-formed but semantically empty payload (empty content, null stop
+	// reason) rather than failing — which would hide the real error from the
+	// client (e.g. the Anthropic SDK expects Anthropic-format error JSON, not an
+	// empty Anthropic-format success message).
 	outBody := respBody
-	if httpOK && upstreamAPIFormat != clientAPIFormat {
-		// Normalize non-standard reasoning field variants before translation.
-		translationInput := respBody
-		if upstreamAPIFormat == "openai" {
-			translationInput = normalizeOpenAIReasoningField(translationInput)
-		}
-		var param any
-		if translated := translate.TranslateResponseNonStream(
-			req.Context(), clientAPIFormat, upstreamAPIFormat, model,
-			originalClientBody, body, translationInput, &param,
-		); len(translated) > 0 {
-			outBody = translated
+	if upstreamAPIFormat != clientAPIFormat {
+		if !httpOK {
+			outBody = buildErrorBody(clientAPIFormat, statusCode, extractErrorText(respBody))
+		} else {
+			// Normalize non-standard reasoning field variants before translation.
+			translationInput := respBody
+			if upstreamAPIFormat == "openai" {
+				translationInput = normalizeOpenAIReasoningField(respBody)
+			}
+			var param any
+			if translated := translate.TranslateResponseNonStream(
+				req.Context(), clientAPIFormat, upstreamAPIFormat, model,
+				originalClientBody, body, translationInput, &param,
+			); len(translated) > 0 {
+				outBody = translated
+			}
 		}
 	}
 	var errText *string
@@ -765,7 +805,10 @@ func adjustMaxTokensForOpenAIReasoning(upstreamBody, clientBody []byte, clientFm
 		return upstreamBody
 	}
 
-	maxTokens := gjson.GetBytes(upstreamBody, "max_tokens").Int()
+	// Read max_tokens from the original client body (Anthropic format), not the
+	// translated upstream body, so the computation is independent of whatever the
+	// CLIProxyAPI translator does with max_tokens during format conversion.
+	maxTokens := gjson.GetBytes(clientBody, "max_tokens").Int()
 	if maxTokens <= 0 {
 		return upstreamBody
 	}
@@ -846,6 +889,37 @@ func truncateBytes(b []byte, n int) string {
 	return string(b)
 }
 
+// buildErrorBody constructs a minimal proper error response in the client's
+// expected API format. Used as fallback when error translation fails.
+func buildErrorBody(apiFormat string, statusCode int, errMsg string) []byte {
+	if errMsg == "" {
+		errMsg = http.StatusText(statusCode)
+		if errMsg == "" {
+			errMsg = fmt.Sprintf("upstream returned %d", statusCode)
+		}
+	}
+	switch apiFormat {
+	case "anthropic":
+		v, _ := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"type":    "error",
+				"message": errMsg,
+			},
+		})
+		return v
+	default:
+		// openai, openai-responses, openai-images
+		v, _ := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"message": errMsg,
+				"type":    "proxy_error",
+				"code":    statusCode,
+			},
+		})
+		return v
+	}
+}
+
 // ---- Payload scripts ----
 
 // runPayloadScripts executes enabled scripts in order (chained).
@@ -903,14 +977,51 @@ func (s *Service) runPayloadScripts(
 }
 
 // headerToMap converts http.Header to a flat map[string]string (first value per key).
+// Sensitive headers (Authorization, X-Api-Key) are masked to avoid leaking plaintext
+// API keys into verbose logs.
 func headerToMap(h http.Header) map[string]string {
 	m := make(map[string]string, len(h))
 	for k, vs := range h {
 		if len(vs) > 0 {
-			m[k] = vs[0]
+			v := vs[0]
+			// Mask sensitive auth headers to avoid leaking API keys into logs.
+			if strings.EqualFold(k, "authorization") || strings.EqualFold(k, "x-api-key") {
+				v = maskSecret(v)
+			}
+			m[k] = v
 		}
 	}
 	return m
+}
+
+// maskSecret redacts a secret/token value for logging, keeping only a short
+// prefix (after any "Bearer "/"Basic " scheme prefix) so the masked value can
+// still be visually distinguished in logs without leaking most of the key.
+// Unlike a fixed byte-count truncation, this scales the visible prefix to the
+// token length so short tokens (e.g. "sk-1", 4 chars) aren't fully exposed.
+func maskSecret(v string) string {
+	scheme := ""
+	token := v
+	if i := strings.IndexByte(v, ' '); i > 0 && i < 32 {
+		scheme = v[:i+1] // e.g. "Bearer "
+		token = v[i+1:]
+	}
+	if token == "" {
+		return v
+	}
+	// Show at most ~25% of the token, capped to [2,6] visible characters.
+	visible := len(token) / 4
+	if visible < 2 {
+		visible = 2
+	}
+	if visible > 6 {
+		visible = 6
+	}
+	if visible >= len(token) {
+		// Token too short to safely show any prefix — mask entirely.
+		return scheme + "***"
+	}
+	return scheme + token[:visible] + "***"
 }
 
 // tryParseJSON returns the parsed JSON value if body is valid JSON, else the raw string.

@@ -288,7 +288,9 @@ func TestVerboseLoggingDefaultFalse(t *testing.T) {
 	}
 }
 
-func TestDumpIncludesVerboseLogging(t *testing.T) {
+// TestRequestTimeoutHoursRoundtrip verifies the request_timeout_seconds field is
+// parsed, validated, and round-tripped through Dump/Build.
+func TestRequestTimeoutRoundtrip(t *testing.T) {
 	raw := `
 providers:
   - name: sn
@@ -304,14 +306,162 @@ combos:
     members:
       - provider: sn
         model: m
-verbose_logging: true
+general:
+  request_timeout_seconds: 900
 `
 	cfg := loadFromText(t, raw)
-	if !cfg.VerboseLogging {
-		t.Fatal("expected verbose_logging true")
+	if cfg.General.RequestTimeoutSeconds != 900 {
+		t.Fatalf("expected request_timeout_seconds 900, got %d", cfg.General.RequestTimeoutSeconds)
 	}
 	d := Dump(cfg)
-	if d["verbose_logging"] != true {
-		t.Fatal("expected verbose_logging true in dump")
+	general := d["general"].(map[string]any)
+	if general["request_timeout_seconds"] != 900 {
+		t.Fatalf("expected request_timeout_seconds 900 in dump, got %v", general["request_timeout_seconds"])
 	}
+	rebuilt, err := Build(d)
+	if err != nil {
+		t.Fatalf("rebuild from dump: %v", err)
+	}
+	if rebuilt.General.RequestTimeoutSeconds != 900 {
+		t.Fatalf("expected 900 after rebuild, got %d", rebuilt.General.RequestTimeoutSeconds)
+	}
+}
+
+// TestRequestTimeoutUnsetDefaultsZero verifies that an unset timeout stays 0
+// (the caller applies the default at runtime).
+func TestRequestTimeoutUnsetDefaultsZero(t *testing.T) {
+	cfg := loadFromText(t, minimal)
+	if cfg.General.RequestTimeoutSeconds != 0 {
+		t.Fatalf("expected 0 when unset, got %d", cfg.General.RequestTimeoutSeconds)
+	}
+}
+
+// TestRejectsInvalidRequestTimeout verifies a negative timeout is rejected.
+func TestRejectsInvalidRequestTimeout(t *testing.T) {
+	mustReject(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+    health_check_rules: []
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+general:
+  request_timeout_seconds: -5
+`)
+}
+
+// TestRequestTimeoutZeroMeansDisabled verifies an explicit 0 disables the
+// timeout (represented internally as RequestTimeoutDisabled) and round-trips
+// back to 0 through Dump/Build.
+func TestRequestTimeoutZeroMeansDisabled(t *testing.T) {
+	raw := `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+    health_check_rules: []
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+general:
+  request_timeout_seconds: 0
+`
+	cfg := loadFromText(t, raw)
+	if cfg.General.RequestTimeoutSeconds != RequestTimeoutDisabled {
+		t.Fatalf("expected RequestTimeoutDisabled sentinel, got %d", cfg.General.RequestTimeoutSeconds)
+	}
+	d := Dump(cfg)
+	general := d["general"].(map[string]any)
+	if general["request_timeout_seconds"] != 0 {
+		t.Fatalf("expected request_timeout_seconds 0 in dump, got %v", general["request_timeout_seconds"])
+	}
+	rebuilt, err := Build(d)
+	if err != nil {
+		t.Fatalf("rebuild from dump: %v", err)
+	}
+	if rebuilt.General.RequestTimeoutSeconds != RequestTimeoutDisabled {
+		t.Fatalf("expected RequestTimeoutDisabled after rebuild, got %d", rebuilt.General.RequestTimeoutSeconds)
+	}
+}
+
+// TestHTTPStatusCodeRuleRoundtrip verifies http_status_codes is parsed, dumped,
+// and rebuilt correctly.
+func TestHTTPStatusCodeRuleRoundtrip(t *testing.T) {
+	raw := `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+    health_check_rules:
+      - description: any 429 or 5xx
+        http_status_codes: [429, 500, 502, 503]
+        action: rotate
+        cooldown_seconds: 60
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+`
+	cfg := loadFromText(t, raw)
+	rule := cfg.Providers[0].HealthCheckRules[0]
+	if len(rule.HTTPStatusCodes) != 4 || rule.HTTPStatusCodes[0] != 429 {
+		t.Fatalf("expected http_status_codes [429 500 502 503], got %v", rule.HTTPStatusCodes)
+	}
+	// jsonpath should stay empty when only status codes are configured.
+	if rule.JSONPath != "" {
+		t.Fatalf("expected empty jsonpath, got %q", rule.JSONPath)
+	}
+	d := Dump(cfg)
+	ruleDump := d["providers"].([]any)[0].(map[string]any)["health_check_rules"].([]any)[0].(map[string]any)
+	codesAny, ok := ruleDump["http_status_codes"].([]any)
+	if !ok || len(codesAny) != 4 {
+		t.Fatalf("expected http_status_codes in dump, got %T %v", ruleDump["http_status_codes"], ruleDump["http_status_codes"])
+	}
+	rebuilt, err := Build(d)
+	if err != nil {
+		t.Fatalf("rebuild from dump: %v", err)
+	}
+	got := rebuilt.Providers[0].HealthCheckRules[0].HTTPStatusCodes
+	if len(got) != 4 || got[0] != 429 {
+		t.Fatalf("expected [429 500 502 503] after rebuild, got %v", got)
+	}
+}
+
+func TestRejectsInvalidHTTPStatusCode(t *testing.T) {
+	mustReject(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+    health_check_rules:
+      - http_status_codes: [99]
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+`)
 }

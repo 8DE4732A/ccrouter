@@ -34,13 +34,26 @@ func (x jsonPathExpr) find(data any) []any {
 }
 
 // matchRotationRules returns the first matching health rule for provider+model.
-func (s *Service) matchRotationRules(body []byte, providerName, model string) *config.HealthCheckRule {
+// statusCode is the upstream HTTP status code (used for http_status_codes rules).
+func (s *Service) matchRotationRules(body []byte, providerName, model string, statusCode int) *config.HealthCheckRule {
 	var data any
 	if err := json.Unmarshal(body, &data); err != nil {
-		return nil
+		data = nil
 	}
 	for _, cr := range s.providerRules[providerName] {
 		if len(cr.rule.Models) > 0 && !containsString(cr.rule.Models, model) {
+			continue
+		}
+		// Check HTTP status code match first (if rule lists status codes).
+		if len(cr.rule.HTTPStatusCodes) > 0 {
+			for _, code := range cr.rule.HTTPStatusCodes {
+				if code == statusCode {
+					return cr.rule
+				}
+			}
+		}
+		// Skip JSONPath body check if no JSONPath or no body data.
+		if cr.rule.JSONPath == "" || cr.expr.expr == nil || data == nil {
 			continue
 		}
 		for _, v := range cr.expr.find(data) {

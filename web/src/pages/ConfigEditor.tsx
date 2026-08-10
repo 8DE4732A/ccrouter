@@ -13,13 +13,13 @@ const ALL_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'op
 const EMPTY_ENDPOINT = (): ApiEndpoint => ({ api_format: 'openai', base_url: '' })
 const EMPTY_RULE = (): HealthCheckRule => ({
   description: '', jsonpath: '$.error.type', match_value: '',
-  match_type: 'equals', action: 'rotate', cooldown_seconds: 60, models: [],
+  match_type: 'equals', action: 'rotate', cooldown_seconds: 60, models: [], http_status_codes: [],
 })
 const EMPTY_PROVIDER = (): ProviderConfig => ({
   name: '', api: [EMPTY_ENDPOINT()], max_retries: 3,
   key_strategy: 'fill-first', keys: [{ key: '' }], health_check_rules: [],
 })
-const EMPTY_GENERAL = (): GeneralConfig => ({ api_keys: [], proxy: undefined })
+const EMPTY_GENERAL = (): GeneralConfig => ({ api_keys: [], proxy: undefined, request_timeout_seconds: undefined })
 const EMPTY_COMBO = (): ComboConfig => ({
   name: '', api_format: ['openai'], strategy: 'fill-first',
   members: [{ provider: '', model: '' }], aliases: [],
@@ -273,6 +273,20 @@ function ProviderDetail({
                     onChange={e => onUpdate({
                       health_check_rules: p.health_check_rules.map((rr, rj) =>
                         rj === ri ? { ...rr, models: e.target.value.split(',').map(s => s.trim()).filter(Boolean) } : rr
+                      ),
+                    })} />
+                </div>
+                <div style={{ gridColumn: 'span 2' }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-3)', marginBottom: 4 }}>
+                    HTTP 状态码 <span style={{ color: 'var(--text-3)' }}>（逗号分隔，如 429, 500；空=仅按 JSONPath 匹配）</span>
+                  </div>
+                  <input value={(r.http_status_codes ?? []).join(',')} placeholder="429, 500, 502, 503"
+                    onChange={e => onUpdate({
+                      health_check_rules: p.health_check_rules.map((rr, rj) =>
+                        rj === ri ? {
+                          ...rr,
+                          http_status_codes: e.target.value.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
+                        } : rr
                       ),
                     })} />
                 </div>
@@ -548,6 +562,33 @@ function GeneralPanel({
             {proxy.url ? `✓ 全局代理已设置` : '代理地址为空，全局代理未启用'}
           </div>
         )}
+      </div>
+
+      {/* Request Timeout */}
+      <div>
+        <SectionLabel>请求超时设置</SectionLabel>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+          每个上游请求的总超时时间。超时后网关会返回 504 错误并尝试重试（如果有备用 key 或 member）。
+          设置为 <code>0</code> 表示禁用超时（无限等待），留空则使用默认值。
+        </div>
+        <FieldRow label="超时时间（秒）" hint="留空 = 默认 600 秒（10 分钟）；0 = 禁用超时">
+          <input
+            type="number"
+            min={0}
+            placeholder="600"
+            value={general.request_timeout_seconds ?? ''}
+            onChange={e => {
+              const raw = e.target.value
+              if (raw === '') {
+                onUpdate({ request_timeout_seconds: undefined })
+                return
+              }
+              const val = parseInt(raw, 10)
+              onUpdate({ request_timeout_seconds: isNaN(val) || val < 0 ? undefined : val })
+            }}
+            style={{ maxWidth: 120 }}
+          />
+        </FieldRow>
       </div>
     </div>
   )

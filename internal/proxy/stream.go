@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -50,20 +51,28 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 	if !strings.Contains(strings.ToLower(mediaType), "text/event-stream") {
 		defer resp.Body.Close()
 		respBody, _ := io.ReadAll(resp.Body)
-		matched := s.matchRotationRules(respBody, providerName, model)
+		matched := s.matchRotationRules(respBody, providerName, model, statusCode)
 		if matched != nil {
 			return false, matched
 		}
 		httpOK := statusCode < 400
 
+		// For error responses, skip the upstream→client translator and build the
+		// error directly in the client's format — translators are written for
+		// success-shaped bodies and may silently return a well-formed but
+		// semantically empty payload for an error body, hiding the real error.
 		outBody := respBody
-		if httpOK && upstreamAPIFormat != clientAPIFormat {
-			var param any
-			if translated := translate.TranslateResponseNonStream(
-				req.Context(), clientAPIFormat, upstreamAPIFormat, model,
-				originalClientBody, body, respBody, &param,
-			); len(translated) > 0 {
-				outBody = translated
+		if upstreamAPIFormat != clientAPIFormat {
+			if !httpOK {
+				outBody = buildErrorBody(clientAPIFormat, statusCode, extractErrorText(respBody))
+			} else {
+				var param any
+				if translated := translate.TranslateResponseNonStream(
+					req.Context(), clientAPIFormat, upstreamAPIFormat, model,
+					originalClientBody, body, respBody, &param,
+				); len(translated) > 0 {
+					outBody = translated
+				}
 			}
 		}
 
@@ -90,27 +99,25 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		return true, nil
 	}
 
-	// Buffer until first SSE frame boundary so we can check for errors.
-	buf := bytes.Buffer{}
-	chunk := make([]byte, 4096)
+	// Use a single bufio.Scanner to read the entire SSE stream.
+	// This eliminates the first-buffer handoff which was prone to data loss
+	// with both CRLF (\r\n\r\n) and partial-frame boundaries.
+	//
+	// We read the first frame before writing headers so that checkSSEError
+	// can still trigger key rotation on error frames. After that, headers
+	// are written and the remaining frames stream through the same scanner.
 	reader := bufio.NewReader(resp.Body)
-	var first []byte
-	for {
-		n, rerr := reader.Read(chunk)
-		if n > 0 {
-			buf.Write(chunk[:n])
-			if bytes.Contains(buf.Bytes(), []byte("\n\n")) || bytes.Contains(buf.Bytes(), []byte("\r\n\r\n")) {
-				break
-			}
-		}
-		if rerr != nil {
-			break // EOF
-		}
-	}
-	first = buf.Bytes()
+	scanner := bufio.NewScanner(reader)
+	scanner.Split(splitSSEFrame)
+	scanner.Buffer(make([]byte, 256*1024), 1024*1024)
 
-	matched := s.checkSSEError(first, providerName, model)
-	if matched != nil {
+	// Read first frame for error checking before writing success headers.
+	var firstFrame []byte
+	hasFirstFrame := scanner.Scan()
+	if hasFirstFrame {
+		firstFrame = scanner.Bytes()
+	}
+	if matched := s.checkSSEError(firstFrame, providerName, model, statusCode); matched != nil {
 		resp.Body.Close()
 		return false, matched
 	}
@@ -192,9 +199,18 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 			//   (a) a complete SSE frame: "event: ...\ndata: ...\n\n"
 			//   (b) bare JSON bytes (legacy path)
 			// Only wrap case (b) with "data: ...\n\n".
+			//
+			// IMPORTANT: CLIProxyAPI's SSEEventData() produces "event: X\ndata: {...}"
+			// WITHOUT a trailing blank line. The SSE spec requires \n\n (or \r\n\r\n)
+			// after each frame for the client parser to dispatch the event. If the
+			// translator output is missing the terminator, the client (e.g. Codex)
+			// will never see events individually and will report "stream closed before
+			// response.completed" even though the full stream was written.
 			isSSEFrame := bytes.HasPrefix(out, []byte("data:")) || bytes.HasPrefix(out, []byte("event:"))
 			if !isSSEFrame {
 				out = append([]byte("data: "), append(out, '\n', '\n')...)
+			} else if !bytes.HasSuffix(out, []byte("\n\n")) && !bytes.HasSuffix(out, []byte("\r\n\r\n")) {
+				out = append(out, '\n', '\n')
 			}
 			_, werr := w.Write(out)
 			if doAccumulate {
@@ -207,22 +223,14 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		return true
 	}
 
-	// Write buffered first frame(s), then stream the rest.
+	// Stream all frames using the single scanner.
+	// The scanner splits on SSE frame boundaries (\n\n or \r\n\r\n), so each
+	// Scan() call yields exactly one complete frame regardless of TCP packet
+	// boundaries or line-ending style.
 	holder := newUsageHolder()
-
-	// processFrames splits buffered data into complete SSE frames and processes each one.
-	// Used for the initial buffered first-frame data which may contain multiple frames.
-	processFrames := func(data []byte) bool {
-		for _, frame := range splitSSEFrames(data) {
-			sniffUsageChunk(frame, upstreamAPIFormat, holder)
-			if !writeFrame(frame) {
-				return false
-			}
-		}
-		return true
-	}
-	if len(first) > 0 {
-		if !processFrames(first) {
+	if hasFirstFrame && len(bytes.TrimSpace(firstFrame)) > 0 {
+		sniffUsageChunk(firstFrame, upstreamAPIFormat, holder)
+		if !writeFrame(firstFrame) {
 			resp.Body.Close()
 			s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
 			return true, nil
@@ -231,13 +239,6 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 			f.Flush()
 		}
 	}
-
-	// Stream remaining frames using a scanner that splits on SSE frame boundaries (\n\n).
-	// This ensures each Scan() token is exactly one complete SSE frame, preventing
-	// content loss when TCP packet boundaries fall inside an SSE frame.
-	scanner := bufio.NewScanner(reader)
-	scanner.Split(splitSSEFrame)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024)
 	for scanner.Scan() {
 		frame := scanner.Bytes()
 		if len(bytes.TrimSpace(frame)) == 0 {
@@ -254,6 +255,13 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		}
 	}
 	resp.Body.Close()
+	if err := scanner.Err(); err != nil {
+		// Scanner error (e.g. token too long) — the stream was truncated.
+		// Mark the attempt as failed so the record is accurate, but don't
+		// override the HTTP status since we've already started streaming data.
+		log.Printf("SSE scanner error: provider=%s model=%s err=%v", providerName, model, err)
+		success = false
+	}
 	s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
 	return true, nil
 }
@@ -276,20 +284,6 @@ func splitSSEFrame(data []byte, atEOF bool) (advance int, token []byte, err erro
 		return len(data), data, nil
 	}
 	return 0, nil, nil
-}
-
-// splitSSEFrames splits buffered SSE data into individual complete frames.
-// Used for the initial first-frame buffer which may contain multiple frames.
-func splitSSEFrames(data []byte) [][]byte {
-	var result [][]byte
-	parts := bytes.Split(data, []byte("\n\n"))
-	for _, p := range parts {
-		p = bytes.TrimSpace(p)
-		if len(p) > 0 {
-			result = append(result, append(p, '\n', '\n'))
-		}
-	}
-	return result
 }
 
 // extractSSEDataLine extracts the "data: ..." line from a complete SSE frame.
@@ -333,7 +327,30 @@ func (s *Service) finishStream(combo, providerName, model, key, clientAPIFormat 
 }
 
 // checkSSEError inspects the buffered first SSE chunk for a matching health rule.
-func (s *Service) checkSSEError(data []byte, providerName, model string) *config.HealthCheckRule {
+// statusCode is the upstream HTTP status code (used for http_status_codes rules).
+//
+// HTTP status code rules are checked unconditionally, independent of whether the
+// first frame contains a parseable "data:" line — this matches the behavior of
+// matchRotationRules (the non-streaming path) so a rule based purely on
+// http_status_codes still fires even when the upstream returns an empty body,
+// a non-JSON error page, or a frame without a "data:" prefix.
+func (s *Service) checkSSEError(data []byte, providerName, model string, statusCode int) *config.HealthCheckRule {
+	// Pass 1: HTTP status code rules — evaluated regardless of body content.
+	for _, cr := range s.providerRules[providerName] {
+		if len(cr.rule.Models) > 0 && !containsString(cr.rule.Models, model) {
+			continue
+		}
+		if len(cr.rule.HTTPStatusCodes) == 0 {
+			continue
+		}
+		for _, code := range cr.rule.HTTPStatusCodes {
+			if code == statusCode {
+				return cr.rule
+			}
+		}
+	}
+
+	// Pass 2: JSONPath/body-based rules — require a parseable "data:" line.
 	text := string(data)
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
@@ -350,6 +367,9 @@ func (s *Service) checkSSEError(data []byte, providerName, model string) *config
 		}
 		for _, cr := range s.providerRules[providerName] {
 			if len(cr.rule.Models) > 0 && !containsString(cr.rule.Models, model) {
+				continue
+			}
+			if cr.rule.JSONPath == "" || cr.expr.expr == nil {
 				continue
 			}
 			for _, v := range cr.expr.find(parsed) {
