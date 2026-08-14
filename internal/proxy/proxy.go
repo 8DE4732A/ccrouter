@@ -679,6 +679,17 @@ func isStreamingRequest(r *http.Request, body []byte) bool {
 }
 
 func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http.Header {
+	// Remember which auth scheme(s) the incoming client request used, before
+	// we strip them below. We mirror whatever the client sent — swapping in
+	// our own upstream apiKey — rather than forcing a single scheme based on
+	// upstreamAPIFormat. Some Anthropic-compatible upstreams only accept
+	// "Authorization: Bearer" and reject "x-api-key" (or vice versa), so
+	// forcing one scheme regardless of client behavior breaks those
+	// upstreams. If the client sent neither, fall back to the historical
+	// per-format default.
+	hadXAPIKey := r.Header.Get("X-Api-Key") != ""
+	hadAuthorization := r.Header.Get("Authorization") != ""
+
 	h := http.Header{}
 	for k, vs := range r.Header {
 		kl := strings.ToLower(k)
@@ -700,16 +711,25 @@ func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http
 		}
 	}
 
-	// Set upstream auth header in the format the upstream API expects.
-	// Anthropic endpoints use "x-api-key"; Gemini uses ?key= query param (set on URL, not here);
-	// all others use "Authorization: Bearer".
-	switch upstreamAPIFormat {
-	case "anthropic":
-		h.Set("X-Api-Key", apiKey)
-	case "gemini":
+	if upstreamAPIFormat == "gemini" {
 		// Auth is added as ?key= query param in buildGeminiURL, not as a header.
-	default:
-		h.Set("Authorization", "Bearer "+apiKey)
+	} else if hadXAPIKey || hadAuthorization {
+		// Mirror the client's chosen scheme(s), substituting our real key.
+		if hadXAPIKey {
+			h.Set("X-Api-Key", apiKey)
+		}
+		if hadAuthorization {
+			h.Set("Authorization", "Bearer "+apiKey)
+		}
+	} else {
+		// Client sent no auth at all (e.g. internal callers) — fall back to
+		// the per-format default so requests still authenticate upstream.
+		switch upstreamAPIFormat {
+		case "anthropic":
+			h.Set("X-Api-Key", apiKey)
+		default:
+			h.Set("Authorization", "Bearer "+apiKey)
+		}
 	}
 
 	h.Del("Host")

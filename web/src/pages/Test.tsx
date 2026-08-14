@@ -186,6 +186,8 @@ export default function TestPage() {
   const [copied, setCopied] = useState(false)
   const [thinkingOpen, setThinkingOpen] = useState(true)
   const [apiKey, setApiKey] = useState('')
+  const [authBearer, setAuthBearer] = useState(true)
+  const [authXApiKey, setAuthXApiKey] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const outputRef = useRef<HTMLDivElement>(null)
   const t0Ref = useRef<number>(0)
@@ -216,6 +218,15 @@ export default function TestPage() {
     ? normalizeFormats(cfg.combos.find(c => c.name === comboName)?.api_format ?? 'openai')
     : ['openai']
 
+  // When testing the Anthropic format, at least one auth header must stay
+  // checked (both may be checked to test upstreams that only accept one
+  // scheme). For other formats we always send Authorization: Bearer.
+  const setAuthChecked = (which: 'bearer' | 'xApiKey', checked: boolean) => {
+    const other = which === 'bearer' ? authXApiKey : authBearer
+    if (!checked && !other) return // keep at least one checked
+    ;(which === 'bearer' ? setAuthBearer : setAuthXApiKey)(checked)
+  }
+
   const stop = () => {
     abortRef.current?.abort()
     setState('done')
@@ -238,11 +249,14 @@ export default function TestPage() {
 
     try {
       const body = buildBody(fmt, comboName, prompt.trim(), stream, imageSizeCustom.trim() || imageSize, thinking)
+      const useBearer = fmt === 'anthropic' ? authBearer : true
+      const useXApiKey = fmt === 'anthropic' ? authXApiKey : false
       const resp = await fetch(FMT_ENDPOINT[fmt], {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          ...(apiKey ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+          ...(apiKey && useBearer ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+          ...(apiKey && useXApiKey ? { 'X-Api-Key': apiKey } : {}),
         },
         body: JSON.stringify(body),
         signal: ctrl.signal,
@@ -339,6 +353,34 @@ export default function TestPage() {
                 style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
                 disabled={state === 'streaming' || state === 'sending'}
               />
+              {fmt === 'anthropic' && (
+                <div style={{ marginTop: 10 }}>
+                  <div className="field-label" style={{ marginBottom: 5 }}>
+                    认证方式
+                    <span className="dim" style={{ marginLeft: 6 }}>至少勾选一种，可同时勾选测试兼容性</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 16 }}>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={authBearer}
+                        onChange={e => setAuthChecked('bearer', e.target.checked)}
+                        disabled={state === 'streaming' || state === 'sending'}
+                      />
+                      <span style={{ fontSize: 12 }}>Authorization: Bearer</span>
+                    </label>
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                      <input
+                        type="checkbox"
+                        checked={authXApiKey}
+                        onChange={e => setAuthChecked('xApiKey', e.target.checked)}
+                        disabled={state === 'streaming' || state === 'sending'}
+                      />
+                      <span style={{ fontSize: 12 }}>X-Api-Key</span>
+                    </label>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
 

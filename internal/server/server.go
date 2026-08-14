@@ -93,10 +93,13 @@ func Router(state *gateway.State) *gin.Engine {
 	return r
 }
 
-// apiKeyAuth returns a middleware that validates the Bearer token against
-// general.api_keys. If no api_keys are configured, all requests are allowed.
-// Accepts both "Authorization: Bearer <key>" (OpenAI style) and
-// "x-api-key: <key>" (Anthropic style).
+// apiKeyAuth returns a middleware that validates the client's credentials
+// against general.api_keys. If no api_keys are configured, all requests are
+// allowed. Accepts both "Authorization: Bearer <key>" (OpenAI style) and
+// "x-api-key: <key>" (Anthropic style). If the client sends only one of the
+// two, that one must match a configured key. If the client sends both, both
+// must independently match a configured key — a stray/incorrect value in
+// either header is rejected, rather than silently ignored.
 func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		svc := state.Service()
@@ -106,30 +109,45 @@ func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 			return
 		}
 
-		// Extract token — prefer x-api-key, fall back to Authorization: Bearer.
-		token := c.GetHeader("X-Api-Key")
-		if token == "" {
-			auth := c.GetHeader("Authorization")
+		matches := func(token string) bool {
+			for _, k := range keys {
+				if k.Key == token {
+					return true
+				}
+			}
+			return false
+		}
+
+		xAPIKey := c.GetHeader("X-Api-Key")
+
+		var bearerToken string
+		hasBearer := false
+		if auth := c.GetHeader("Authorization"); auth != "" {
 			const prefix = "Bearer "
 			if len(auth) > len(prefix) && auth[:len(prefix)] == prefix {
-				token = auth[len(prefix):]
+				bearerToken = auth[len(prefix):]
+				hasBearer = true
 			}
 		}
 
-		if token == "" {
+		if xAPIKey == "" && !hasBearer {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 				"error": "missing API key (send Authorization: Bearer <key> or X-Api-Key: <key>)",
 				"type":  "auth_error",
 			})
 			return
 		}
-		for _, k := range keys {
-			if k.Key == token {
-				c.Next()
-				return
-			}
+
+		if xAPIKey != "" && !matches(xAPIKey) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API key", "type": "auth_error"})
+			return
 		}
-		c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API key", "type": "auth_error"})
+		if hasBearer && !matches(bearerToken) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API key", "type": "auth_error"})
+			return
+		}
+
+		c.Next()
 	}
 }
 

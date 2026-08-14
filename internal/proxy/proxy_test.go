@@ -465,3 +465,76 @@ func TestErrorResponseNotSilentlyEmptiedByTranslator(t *testing.T) {
 		t.Fatalf("error response should not contain a 'content' field (that would mean the translator ran on the error body): %s", rec.Body.String())
 	}
 }
+
+func TestBuildHeadersMirrorsClientAuthScheme(t *testing.T) {
+	newReq := func(setXAPIKey, setBearer bool) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "http://example.com/v1/messages", nil)
+		if setXAPIKey {
+			r.Header.Set("X-Api-Key", "client-original-key")
+		}
+		if setBearer {
+			r.Header.Set("Authorization", "Bearer client-original-token")
+		}
+		return r
+	}
+
+	t.Run("client sent only x-api-key: upstream gets x-api-key with real key, no Authorization", func(t *testing.T) {
+		h := buildHeaders(newReq(true, false), "real-upstream-key", "anthropic")
+		if got := h.Get("X-Api-Key"); got != "real-upstream-key" {
+			t.Errorf("X-Api-Key = %q, want %q", got, "real-upstream-key")
+		}
+		if got := h.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
+		}
+	})
+
+	t.Run("client sent only Bearer: upstream gets Bearer with real key, no x-api-key", func(t *testing.T) {
+		h := buildHeaders(newReq(false, true), "real-upstream-key", "anthropic")
+		if got := h.Get("Authorization"); got != "Bearer real-upstream-key" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer real-upstream-key")
+		}
+		if got := h.Get("X-Api-Key"); got != "" {
+			t.Errorf("X-Api-Key = %q, want empty", got)
+		}
+	})
+
+	t.Run("client sent both: upstream gets both with real key", func(t *testing.T) {
+		h := buildHeaders(newReq(true, true), "real-upstream-key", "anthropic")
+		if got := h.Get("X-Api-Key"); got != "real-upstream-key" {
+			t.Errorf("X-Api-Key = %q, want %q", got, "real-upstream-key")
+		}
+		if got := h.Get("Authorization"); got != "Bearer real-upstream-key" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer real-upstream-key")
+		}
+	})
+
+	t.Run("client sent neither: falls back to per-format default (anthropic -> x-api-key)", func(t *testing.T) {
+		h := buildHeaders(newReq(false, false), "real-upstream-key", "anthropic")
+		if got := h.Get("X-Api-Key"); got != "real-upstream-key" {
+			t.Errorf("X-Api-Key = %q, want %q", got, "real-upstream-key")
+		}
+		if got := h.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
+		}
+	})
+
+	t.Run("client sent neither: falls back to per-format default (openai -> Bearer)", func(t *testing.T) {
+		h := buildHeaders(newReq(false, false), "real-upstream-key", "openai")
+		if got := h.Get("Authorization"); got != "Bearer real-upstream-key" {
+			t.Errorf("Authorization = %q, want %q", got, "Bearer real-upstream-key")
+		}
+		if got := h.Get("X-Api-Key"); got != "" {
+			t.Errorf("X-Api-Key = %q, want empty", got)
+		}
+	})
+
+	t.Run("gemini: no auth header set even if client sent x-api-key/Bearer", func(t *testing.T) {
+		h := buildHeaders(newReq(true, true), "real-upstream-key", "gemini")
+		if got := h.Get("X-Api-Key"); got != "" {
+			t.Errorf("X-Api-Key = %q, want empty", got)
+		}
+		if got := h.Get("Authorization"); got != "" {
+			t.Errorf("Authorization = %q, want empty", got)
+		}
+	})
+}

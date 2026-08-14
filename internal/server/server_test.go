@@ -37,10 +37,14 @@ payload_scripts: []
 `
 
 func newTestState(t *testing.T) (*gateway.State, string) {
+	return newTestStateWithYAML(t, testConfigYAML)
+}
+
+func newTestStateWithYAML(t *testing.T, yaml string) (*gateway.State, string) {
 	t.Helper()
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
-	if err := os.WriteFile(cfgPath, []byte(testConfigYAML), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.Load(cfgPath)
@@ -231,4 +235,94 @@ func TestSPAAdmin(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "<!doctype html>") && !strings.Contains(rec.Body.String(), "<html") {
 		t.Fatalf("expected html, got: %s", rec.Body.String()[:min(len(rec.Body.String()), 200)])
 	}
+}
+
+const testConfigYAMLWithAPIKeys = `
+general:
+  api_keys:
+    - key: correct-key
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "http://127.0.0.1:1/v1"
+    keys:
+      - key: sk-1
+    health_check_rules: []
+combos:
+  - name: fast
+    api_format: openai
+    strategy: fill-first
+    members:
+      - provider: sn
+        model: gpt
+verbose_logging: false
+payload_scripts: []
+`
+
+func TestAPIKeyAuthBothHeaders(t *testing.T) {
+	st, _ := newTestStateWithYAML(t, testConfigYAMLWithAPIKeys)
+	r := Router(st)
+
+	doReq := func(xAPIKey, bearer string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("GET", "/v1/models", nil)
+		if xAPIKey != "" {
+			req.Header.Set("X-Api-Key", xAPIKey)
+		}
+		if bearer != "" {
+			req.Header.Set("Authorization", "Bearer "+bearer)
+		}
+		rec := httptest.NewRecorder()
+		r.ServeHTTP(rec, req)
+		return rec
+	}
+
+	t.Run("only x-api-key, correct -> 200", func(t *testing.T) {
+		rec := doReq("correct-key", "")
+		if rec.Code != 200 {
+			t.Fatalf("expected 200, got %d, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("only bearer, correct -> 200", func(t *testing.T) {
+		rec := doReq("", "correct-key")
+		if rec.Code != 200 {
+			t.Fatalf("expected 200, got %d, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("neither -> 401", func(t *testing.T) {
+		rec := doReq("", "")
+		if rec.Code != 401 {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+	})
+
+	t.Run("both correct -> 200", func(t *testing.T) {
+		rec := doReq("correct-key", "correct-key")
+		if rec.Code != 200 {
+			t.Fatalf("expected 200, got %d, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("x-api-key correct, bearer garbage -> 401 (both must match now)", func(t *testing.T) {
+		rec := doReq("correct-key", "garbage-token")
+		if rec.Code != 401 {
+			t.Fatalf("expected 401, got %d, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("bearer correct, x-api-key garbage -> 401 (both must match now)", func(t *testing.T) {
+		rec := doReq("garbage-key", "correct-key")
+		if rec.Code != 401 {
+			t.Fatalf("expected 401, got %d, body=%s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("x-api-key wrong, no bearer -> 401", func(t *testing.T) {
+		rec := doReq("wrong-key", "")
+		if rec.Code != 401 {
+			t.Fatalf("expected 401, got %d", rec.Code)
+		}
+	})
 }
