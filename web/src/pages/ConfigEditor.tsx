@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { getConfig, putConfig, FMT_ENDPOINT, FMT_COLOR, normalizeFormats } from '../api/client'
 import type {
   AppConfig, ProviderConfig, ComboConfig, HealthCheckRule, ComboMember, ApiEndpoint, ApiFormat,
@@ -21,7 +21,7 @@ const EMPTY_PROVIDER = (): ProviderConfig => ({
 })
 const EMPTY_GENERAL = (): GeneralConfig => ({ api_keys: [], proxy: undefined, request_timeout_seconds: undefined })
 const EMPTY_COMBO = (): ComboConfig => ({
-  name: '', api_format: ['openai'], strategy: 'fill-first',
+  name: '', owned_by: 'default', is_default: true, api_format: ['openai'], strategy: 'fill-first',
   members: [{ provider: '', model: '' }], aliases: [],
 })
 const EMPTY_PAYLOAD_SCRIPT = (): PayloadScript => ({ name: '', enabled: true, script: '' })
@@ -64,6 +64,39 @@ function IconChevronRight() {
   return (
     <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
       <polyline points="6 4 10 8 6 12"/>
+    </svg>
+  )
+}
+function IconChevronLeft() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="10 4 6 8 10 12"/>
+    </svg>
+  )
+}
+function IconChevronDown() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2">
+      <polyline points="4 6 8 10 12 6"/>
+    </svg>
+  )
+}
+function IconGrip() {
+  return (
+    <svg width="8" height="13" viewBox="0 0 8 13" fill="currentColor">
+      <circle cx="2" cy="2.5" r="1.2"/>
+      <circle cx="6" cy="2.5" r="1.2"/>
+      <circle cx="2" cy="6.5" r="1.2"/>
+      <circle cx="6" cy="6.5" r="1.2"/>
+      <circle cx="2" cy="10.5" r="1.2"/>
+      <circle cx="6" cy="10.5" r="1.2"/>
+    </svg>
+  )
+}
+function IconFolder() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M1.5 3.5A1.5 1.5 0 0 1 3 2h3.5l1.5 2H13a1.5 1.5 0 0 1 1.5 1.5V13a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 13V3.5z"/>
     </svg>
   )
 }
@@ -317,20 +350,92 @@ function ProviderDetail({
 
 // ── Combo detail panel ───────────────────────────────────────────
 function ComboDetail({
-  cb, providerNames, onUpdate,
+  cb, providerNames, existingGroups, onUpdate,
 }: {
   cb: ComboConfig
   providerNames: string[]
+  existingGroups: string[]
   onUpdate: (patch: Partial<ComboConfig>) => void
 }) {
   const formats = normalizeFormats(cb.api_format)
+  const isDefault = cb.is_default || cb.owned_by === 'default' || !cb.owned_by
+  const fullPrimary = isDefault ? (cb.name || 'fast') : `${cb.owned_by || 'default'}/${cb.name || 'fast'}`
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 28 }}>
       {/* Basic */}
       <div>
         <SectionLabel>基本设置</SectionLabel>
-        <FieldRow label="名称" hint="客户端 model 字段填此值">
+        <FieldRow label="名称" hint="Combo 名称（如 fast, smart 等）">
           <input value={cb.name} placeholder="fast" onChange={e => onUpdate({ name: e.target.value })} />
+        </FieldRow>
+        <FieldRow label="所属分组 (owned_by)" hint="分组 ID。留空或 default 为默认分组；非默认分组在 /v1/models 及请求时使用 <owned_by>/<name>">
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+              <input
+                list="owned-by-options"
+                value={cb.owned_by ?? ''}
+                placeholder="default"
+                style={{ maxWidth: 220 }}
+                onChange={e => {
+                  const val = e.target.value.trim()
+                  onUpdate({
+                    owned_by: val,
+                    is_default: val === '' || val === 'default' ? true : cb.is_default,
+                  })
+                }}
+              />
+              <datalist id="owned-by-options">
+                {existingGroups.map(g => (
+                  <option key={g} value={g} />
+                ))}
+              </datalist>
+              <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={Boolean(cb.is_default)}
+                  onChange={e => onUpdate({ is_default: e.target.checked })}
+                />
+                设为默认分组 (无前缀)
+              </label>
+            </div>
+            {/* Quick group chips */}
+            {existingGroups.length > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 11, color: 'var(--text-3)' }}>快捷归组:</span>
+                {existingGroups.map(g => {
+                  const active = (cb.owned_by || 'default') === g
+                  return (
+                    <button
+                      key={g}
+                      type="button"
+                      onClick={() => onUpdate({
+                        owned_by: g,
+                        is_default: g === 'default' ? true : cb.is_default,
+                      })}
+                      style={{
+                        fontSize: 11, padding: '2px 8px', borderRadius: 4, cursor: 'pointer',
+                        border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
+                        background: active ? 'var(--accent-light)' : 'var(--bg-input)',
+                        color: active ? 'var(--accent)' : 'var(--text-2)',
+                        fontWeight: active ? 600 : 400,
+                      }}
+                    >
+                      {g}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+            <div style={{ fontSize: 11, color: 'var(--text-3)' }}>
+              完整调用标识 Preview：
+              <code style={{
+                fontFamily: 'var(--font-mono)', fontSize: 12, fontWeight: 600,
+                color: 'var(--accent)', background: 'var(--accent-light)',
+                padding: '2px 6px', borderRadius: 4, marginLeft: 4,
+              }}>{fullPrimary}</code>
+            </div>
+          </div>
         </FieldRow>
         <FieldRow label="别名" hint="其他可用的 model ID，逗号分隔">
           <input
@@ -395,16 +500,16 @@ function ComboDetail({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
           {/* Column header */}
           <div style={{
-            display: 'grid', gridTemplateColumns: '24px 1fr 1fr 180px 32px',
+            display: 'grid', gridTemplateColumns: '24px 1fr 1fr 180px 84px',
             gap: 8, padding: '0 10px', marginBottom: 2,
           }}>
-            {['#', 'Provider', '上游模型 ID', '上游 API 格式（可选）', ''].map((h, i) => (
+            {['#', 'Provider', '上游模型 ID', '上游 API 格式（可选）', '操作'].map((h, i) => (
               <span key={i} style={{ fontSize: 11, color: 'var(--text-3)' }}>{h}</span>
             ))}
           </div>
           {cb.members.map((m, mi) => (
             <div key={mi} style={{
-              display: 'grid', gridTemplateColumns: '24px 1fr 1fr 180px 32px',
+              display: 'grid', gridTemplateColumns: '24px 1fr 1fr 180px 84px',
               gap: 8, alignItems: 'center',
               padding: '8px 10px',
               background: 'var(--bg)',
@@ -438,10 +543,50 @@ function ComboDetail({
                 <option value="">— 同客户端格式 —</option>
                 {ALL_FORMATS.map(f => <option key={f} value={f}>{f}</option>)}
               </select>
-              <button className="btn-icon" disabled={cb.members.length <= 1}
-                onClick={() => onUpdate({ members: cb.members.filter((_, mj) => mj !== mi) })}>
-                <IconTrash />
-              </button>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+                <button
+                  type="button"
+                  className="btn-icon"
+                  disabled={mi === 0}
+                  title="上移"
+                  onClick={() => {
+                    const members = [...cb.members]
+                    const temp = members[mi - 1]
+                    members[mi - 1] = members[mi]
+                    members[mi] = temp
+                    onUpdate({ members })
+                  }}
+                  style={{ width: 22, height: 22, padding: 0, fontSize: 11 }}
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  className="btn-icon"
+                  disabled={mi === cb.members.length - 1}
+                  title="下移"
+                  onClick={() => {
+                    const members = [...cb.members]
+                    const temp = members[mi + 1]
+                    members[mi + 1] = members[mi]
+                    members[mi] = temp
+                    onUpdate({ members })
+                  }}
+                  style={{ width: 22, height: 22, padding: 0, fontSize: 11 }}
+                >
+                  ↓
+                </button>
+                <button
+                  type="button"
+                  className="btn-icon"
+                  disabled={cb.members.length <= 1}
+                  title="删除"
+                  onClick={() => onUpdate({ members: cb.members.filter((_, mj) => mj !== mi) })}
+                  style={{ width: 22, height: 22, padding: 0 }}
+                >
+                  <IconTrash />
+                </button>
+              </div>
             </div>
           ))}
           {/* Translation note */}
@@ -652,24 +797,88 @@ export default function ConfigEditor() {
   const [selProvider, setSelProvider] = useState(0)
   const [selCombo, setSelCombo] = useState(0)
   const [selPayload, setSelPayload] = useState(0)
+  const [sideListCollapsed, setSideListCollapsed] = useState(false)
+  const [draggedComboIndex, setDraggedComboIndex] = useState<number | null>(null)
+  const [dragOverComboIndex, setDragOverComboIndex] = useState<number | null>(null)
+  const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set())
+
+  // Group combos by owned_by
+  const groupedCombos = useMemo(() => {
+    if (!cfg) return []
+    const map = new Map<string, { ownedBy: string; isDefault: boolean; combos: { combo: ComboConfig; globalIndex: number }[] }>()
+
+    cfg.combos.forEach((cb, globalIndex) => {
+      const groupKey = (cb.owned_by || 'default').trim()
+      const isDef = Boolean(cb.is_default || groupKey === 'default')
+      if (!map.has(groupKey)) {
+        map.set(groupKey, { ownedBy: groupKey, isDefault: isDef, combos: [] })
+      }
+      const g = map.get(groupKey)!
+      if (cb.is_default) g.isDefault = true
+      g.combos.push({ combo: cb, globalIndex })
+    })
+
+    const list = Array.from(map.values())
+    list.sort((a, b) => {
+      if (a.isDefault && !b.isDefault) return -1
+      if (!a.isDefault && b.isDefault) return 1
+      return a.ownedBy.localeCompare(b.ownedBy)
+    })
+    return list
+  }, [cfg?.combos])
+
+  const existingGroups = useMemo(() => {
+    const set = new Set<string>(['default'])
+    if (cfg) {
+      cfg.combos.forEach(c => {
+        if (c.owned_by) set.add(c.owned_by.trim())
+      })
+    }
+    return Array.from(set)
+  }, [cfg?.combos])
 
   useEffect(() => {
     getConfig()
-      .then(raw => setCfg({
-        ...raw,
-        general: {
-          ...EMPTY_GENERAL(),
-          ...raw.general,
-          api_keys: raw.general?.api_keys ?? [],
-        },
-        combos: raw.combos.map(c => ({
-          aliases: [],
-          ...c,
-          api_format: normalizeFormats(c.api_format),
-          members: c.members.map(m => ({ ...m, upstream_api_format: m.upstream_api_format ?? '' })),
-        })),
-        payload_scripts: raw.payload_scripts ?? [],
-      }))
+      .then(raw => {
+        let flatCombos: ComboConfig[] = []
+        if (Array.isArray(raw.combos)) {
+          for (const item of raw.combos as any[]) {
+            if (Array.isArray(item.combos)) {
+              const groupOwnedBy = item.owned_by || 'default'
+              const groupDefault = Boolean(item.default || item.is_default)
+              for (const inner of item.combos) {
+                flatCombos.push({
+                  aliases: [],
+                  ...inner,
+                  owned_by: inner.owned_by || groupOwnedBy,
+                  is_default: inner.is_default ?? groupDefault,
+                  api_format: normalizeFormats(inner.api_format),
+                  members: (inner.members ?? []).map((m: any) => ({ ...m, upstream_api_format: m.upstream_api_format ?? '' })),
+                })
+              }
+            } else {
+              flatCombos.push({
+                aliases: [],
+                ...item,
+                owned_by: item.owned_by || 'default',
+                is_default: item.is_default ?? (item.owned_by === 'default' || !item.owned_by),
+                api_format: normalizeFormats(item.api_format),
+                members: (item.members ?? []).map((m: any) => ({ ...m, upstream_api_format: m.upstream_api_format ?? '' })),
+              })
+            }
+          }
+        }
+        setCfg({
+          ...raw,
+          general: {
+            ...EMPTY_GENERAL(),
+            ...raw.general,
+            api_keys: raw.general?.api_keys ?? [],
+          },
+          combos: flatCombos,
+          payload_scripts: raw.payload_scripts ?? [],
+        })
+      })
       .catch(e => setErr(String(e)))
   }, [])
 
@@ -700,6 +909,8 @@ export default function ConfigEditor() {
         general: cleanGeneral,
         combos: cfg.combos.map(c => ({
           ...c,
+          owned_by: c.owned_by || 'default',
+          is_default: Boolean(c.is_default),
           api_format: (c.api_format as ApiFormat[]).length === 1
             ? (c.api_format as ApiFormat[])[0]
             : c.api_format,
@@ -739,13 +950,55 @@ export default function ConfigEditor() {
 
   const updateCombo = (i: number, patch: Partial<ComboConfig>) =>
     setCfg(c => c ? { ...c, combos: c.combos.map((cb, j) => j === i ? { ...cb, ...patch } : cb) } : c)
-  const addCombo = () => {
-    setCfg(c => c ? { ...c, combos: [...c.combos, EMPTY_COMBO()] } : c)
+
+  const addCombo = (ownedBy?: string) => {
+    const group = ownedBy || 'default'
+    const isDef = group === 'default' || !group
+    const newCb: ComboConfig = {
+      ...EMPTY_COMBO(),
+      owned_by: group,
+      is_default: isDef,
+    }
+    setCfg(c => c ? { ...c, combos: [...c.combos, newCb] } : c)
     setTimeout(() => setCfg(c => { if (c) setSelCombo(c.combos.length - 1); return c }), 0)
   }
+
+  const addComboGroup = () => {
+    const groupName = window.prompt('请输入新分组名称（如 team-a, pro 等）:')
+    if (!groupName) return
+    const cleanName = groupName.trim().replace(/\//g, '-')
+    if (!cleanName) return
+    addCombo(cleanName)
+  }
+
   const removeCombo = (i: number) => {
     setCfg(c => c ? { ...c, combos: c.combos.filter((_, j) => j !== i) } : c)
     setSelCombo(p => Math.max(0, p > i ? p - 1 : p === i ? Math.max(0, p - 1) : p))
+  }
+
+  const toggleGroupCollapse = (groupName: string) => {
+    setCollapsedGroups(prev => {
+      const next = new Set(prev)
+      if (next.has(groupName)) next.delete(groupName)
+      else next.add(groupName)
+      return next
+    })
+  }
+
+  const handleComboReorder = (fromIndex: number, toIndex: number, targetOwnedBy?: string) => {
+    if (fromIndex === toIndex && !targetOwnedBy) return
+    setCfg(prev => {
+      if (!prev) return prev
+      const newCombos = [...prev.combos]
+      const [moved] = newCombos.splice(fromIndex, 1)
+      if (targetOwnedBy !== undefined) {
+        moved.owned_by = targetOwnedBy
+        moved.is_default = targetOwnedBy === 'default' || !targetOwnedBy
+      }
+      newCombos.splice(toIndex, 0, moved)
+      return { ...prev, combos: newCombos }
+    })
+    setSelCombo(toIndex)
   }
 
   const payloadScripts = (cfg?.payload_scripts ?? [])
@@ -841,101 +1094,281 @@ export default function ConfigEditor() {
 
         {/* ── List panel (providers / combos / payload) ── */}
         {tab !== 'general' && (<>
-        <div style={{ width: 220, minWidth: 220, borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
-          <div style={{ padding: '10px 12px 8px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 6 }}>
-            <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-3)', flex: 1 }}>
-              {tab === 'providers' ? 'Providers' : tab === 'combos' ? 'Combos' : 'Payload 脚本'}
-            </span>
-            <button className="btn-ghost" style={{ padding: '2px 6px', fontSize: 11 }}
-              onClick={tab === 'providers' ? addProvider : tab === 'combos' ? addCombo : addPayloadScript}>
-              <IconPlus /> 添加
+        {sideListCollapsed ? (
+          <div style={{
+            width: 36, minWidth: 36, borderRight: '1px solid var(--border)',
+            display: 'flex', flexDirection: 'column', alignItems: 'center',
+            background: 'var(--bg)', padding: '10px 0', gap: 14,
+          }}>
+            <button
+              className="btn-icon"
+              onClick={() => setSideListCollapsed(false)}
+              title="展开列表"
+              style={{ width: 26, height: 26, padding: 0 }}
+            >
+              <IconChevronRight />
             </button>
+            <div style={{
+              writingMode: 'vertical-rl', fontSize: 11, fontWeight: 600,
+              letterSpacing: '0.08em', textTransform: 'uppercase',
+              color: 'var(--text-3)', userSelect: 'none', cursor: 'pointer',
+            }} onClick={() => setSideListCollapsed(false)}>
+              {tab === 'providers' ? 'Providers' : tab === 'combos' ? 'Combos' : 'Payload 脚本'}
+            </div>
           </div>
-          <div style={{ flex: 1, overflowY: 'auto' }}>
-            {tab !== 'payload' && (tab === 'providers' ? cfg.providers : cfg.combos).map((item, idx) => {
-              const isProvider = tab === 'providers'
-              const selected = isProvider ? selProvider === idx : selCombo === idx
-              const p = item as ProviderConfig
-              const cb = item as ComboConfig
-              const fmts = isProvider
-                ? p.api.map(e => e.api_format)
-                : normalizeFormats(cb.api_format)
-              const label = item.name || (isProvider ? '未命名 Provider' : '未命名 Combo')
+        ) : (
+          <div style={{ width: 240, minWidth: 240, borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
+            <div style={{ padding: '10px 10px 8px 12px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 11, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-3)', flex: 1 }}>
+                {tab === 'providers' ? 'Providers' : tab === 'combos' ? 'Combos 分组' : 'Payload 脚本'}
+              </span>
+              {tab === 'combos' ? (
+                <div style={{ display: 'flex', gap: 3 }}>
+                  <button className="btn-ghost" style={{ padding: '2px 5px', fontSize: 11 }}
+                    onClick={addComboGroup} title="新建分组">
+                    <IconFolder /> 分组
+                  </button>
+                  <button className="btn-ghost" style={{ padding: '2px 5px', fontSize: 11 }}
+                    onClick={() => addCombo()} title="添加 Combo">
+                    <IconPlus /> Combo
+                  </button>
+                </div>
+              ) : (
+                <button className="btn-ghost" style={{ padding: '2px 6px', fontSize: 11 }}
+                  onClick={tab === 'providers' ? addProvider : addPayloadScript}>
+                  <IconPlus /> 添加
+                </button>
+              )}
+              <button
+                className="btn-icon"
+                onClick={() => setSideListCollapsed(true)}
+                title="收起列表"
+                style={{ width: 24, height: 24, padding: 0 }}
+              >
+                <IconChevronLeft />
+              </button>
+            </div>
 
-              return (
-                <div key={idx}
-                  onClick={() => isProvider ? setSelProvider(idx) : setSelCombo(idx)}
-                  style={{
-                    padding: '9px 12px',
-                    cursor: 'pointer',
-                    borderBottom: '1px solid var(--border)',
-                    background: selected ? 'var(--bg-panel)' : 'transparent',
-                    borderLeft: selected ? '2px solid var(--accent)' : '2px solid transparent',
-                    transition: 'background 0.1s',
-                  }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-                    <span style={{
-                      fontSize: 13, fontWeight: selected ? 500 : 400,
-                      color: item.name ? 'var(--text)' : 'var(--text-3)',
-                      flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>{label}</span>
-                    {selected && <IconChevronRight />}
-                  </div>
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {fmts.slice(0, 3).map(f => (
-                      <span key={f} className={`tag ${FMT_COLOR[f as ApiFormat]}`} style={{ fontSize: 10, padding: '1px 5px' }}>
-                        {f.replace('openai-', '').replace('openai', 'oai')}
-                      </span>
-                    ))}
-                    {isProvider && (
+            <div style={{ flex: 1, overflowY: 'auto' }}>
+              {/* ── Providers List ── */}
+              {tab === 'providers' && cfg.providers.map((p, idx) => {
+                const selected = selProvider === idx
+                const fmts = p.api.map(e => e.api_format)
+                const label = p.name || '未命名 Provider'
+
+                return (
+                  <div key={idx}
+                    onClick={() => setSelProvider(idx)}
+                    style={{
+                      padding: '9px 12px',
+                      cursor: 'pointer',
+                      borderBottom: '1px solid var(--border)',
+                      background: selected ? 'var(--bg-panel)' : 'transparent',
+                      borderLeft: selected ? '3px solid var(--accent)' : '3px solid transparent',
+                      transition: 'background 0.1s',
+                    }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <span style={{
+                        fontSize: 13, fontWeight: selected ? 600 : 400,
+                        color: p.name ? 'var(--text)' : 'var(--text-3)',
+                        flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{label}</span>
+                      {selected && <IconChevronRight />}
+                    </div>
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      {fmts.slice(0, 3).map(f => (
+                        <span key={f} className={`tag ${FMT_COLOR[f as ApiFormat]}`} style={{ fontSize: 10, padding: '1px 5px' }}>
+                          {f.replace('openai-', '').replace('openai', 'oai')}
+                        </span>
+                      ))}
                       <span className="tag" style={{ fontSize: 10, padding: '1px 5px' }}>
                         {p.keys.length}k
                       </span>
-                    )}
-                    {!isProvider && (
-                      <span className="tag" style={{ fontSize: 10, padding: '1px 5px' }}>
-                        {cb.members.length}m
-                      </span>
-                    )}
-                    {!isProvider && (cb.aliases ?? []).length > 0 && (
-                      <span className="tag" style={{ fontSize: 10, padding: '1px 5px', color: 'var(--text-2)' }}>
-                        +{(cb.aliases ?? []).length}别名
-                      </span>
-                    )}
+                    </div>
                   </div>
+                )
+              })}
+
+              {/* ── Combos Grouped List ── */}
+              {tab === 'combos' && (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 0' }}>
+                  {groupedCombos.length === 0 && (
+                    <div style={{ padding: '24px 16px', textAlign: 'center', color: 'var(--text-3)', fontSize: 12 }}>
+                      暂无 Combo，点击上方添加
+                    </div>
+                  )}
+                  {groupedCombos.map(group => {
+                    const isGroupCollapsed = collapsedGroups.has(group.ownedBy)
+                    return (
+                      <div key={group.ownedBy} style={{ borderBottom: '1px solid var(--border)', paddingBottom: 4 }}>
+                        {/* Group Header */}
+                        <div style={{
+                          display: 'flex', alignItems: 'center', gap: 5,
+                          padding: '5px 8px', background: 'var(--bg-hover)',
+                          margin: '0 6px 4px', borderRadius: 5,
+                          border: '1px solid var(--border)',
+                        }}>
+                          <button
+                            type="button"
+                            className="btn-icon"
+                            onClick={() => toggleGroupCollapse(group.ownedBy)}
+                            title={isGroupCollapsed ? '展开分组' : '折叠分组'}
+                            style={{ width: 18, height: 18, padding: 0 }}
+                          >
+                            {isGroupCollapsed ? <IconChevronRight /> : <IconChevronDown />}
+                          </button>
+                          <span style={{
+                            fontSize: 12, fontWeight: 600, color: 'var(--text)',
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
+                          }}>
+                            {group.ownedBy}
+                          </span>
+                          {group.isDefault && (
+                            <span className="tag" style={{ fontSize: 9, padding: '1px 4px', color: 'var(--text-3)', background: 'var(--bg)' }}>
+                              默认
+                            </span>
+                          )}
+                          <span style={{ fontSize: 10, color: 'var(--text-3)', fontWeight: 500 }}>
+                            {group.combos.length}
+                          </span>
+                          <button
+                            type="button"
+                            className="btn-icon"
+                            onClick={() => addCombo(group.ownedBy)}
+                            title={`添加 Combo 到 ${group.ownedBy}`}
+                            style={{ width: 18, height: 18, padding: 0 }}
+                          >
+                            <IconPlus />
+                          </button>
+                        </div>
+
+                        {/* Group items */}
+                        {!isGroupCollapsed && (
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            {group.combos.map(({ combo: cb, globalIndex: idx }) => {
+                              const selected = selCombo === idx
+                              const fmts = normalizeFormats(cb.api_format)
+                              const isDragging = draggedComboIndex === idx
+                              const isDragOver = dragOverComboIndex === idx
+
+                              return (
+                                <div
+                                  key={idx}
+                                  draggable
+                                  onDragStart={e => {
+                                    e.dataTransfer.setData('text/plain', String(idx))
+                                    setDraggedComboIndex(idx)
+                                  }}
+                                  onDragOver={e => {
+                                    e.preventDefault()
+                                    if (dragOverComboIndex !== idx) setDragOverComboIndex(idx)
+                                  }}
+                                  onDragLeave={() => {
+                                    if (dragOverComboIndex === idx) setDragOverComboIndex(null)
+                                  }}
+                                  onDrop={e => {
+                                    e.preventDefault()
+                                    if (draggedComboIndex !== null && draggedComboIndex !== idx) {
+                                      handleComboReorder(draggedComboIndex, idx, group.ownedBy)
+                                    }
+                                    setDraggedComboIndex(null)
+                                    setDragOverComboIndex(null)
+                                  }}
+                                  onDragEnd={() => {
+                                    setDraggedComboIndex(null)
+                                    setDragOverComboIndex(null)
+                                  }}
+                                  onClick={() => setSelCombo(idx)}
+                                  style={{
+                                    padding: '7px 8px 7px 6px',
+                                    cursor: 'grab',
+                                    borderBottom: '1px solid var(--border)',
+                                    borderTop: isDragOver ? '2px solid var(--accent)' : 'none',
+                                    background: selected ? 'var(--bg-panel)' : isDragging ? 'var(--bg-hover)' : 'transparent',
+                                    borderLeft: selected ? '3px solid var(--accent)' : '3px solid transparent',
+                                    opacity: isDragging ? 0.35 : 1,
+                                    transition: 'background 0.1s',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 5,
+                                  }}
+                                >
+                                  <div
+                                    style={{ color: 'var(--text-3)', cursor: 'grab', display: 'flex', alignItems: 'center', flexShrink: 0 }}
+                                    title="按住拖拽排序 / 拖拽换组"
+                                  >
+                                    <IconGrip />
+                                  </div>
+                                  <div style={{ flex: 1, minWidth: 0 }}>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 2 }}>
+                                      <span style={{
+                                        fontSize: 12.5, fontWeight: selected ? 600 : 400,
+                                        color: cb.name ? 'var(--text)' : 'var(--text-3)',
+                                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1,
+                                      }}>
+                                        {cb.name || '未命名 Combo'}
+                                      </span>
+                                      {selected && <IconChevronRight />}
+                                    </div>
+                                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                                      {fmts.slice(0, 2).map(f => (
+                                        <span key={f} className={`tag ${FMT_COLOR[f as ApiFormat]}`} style={{ fontSize: 9, padding: '1px 4px' }}>
+                                          {f.replace('openai-', '').replace('openai', 'oai')}
+                                        </span>
+                                      ))}
+                                      <span className="tag" style={{ fontSize: 9, padding: '1px 4px' }}>
+                                        {cb.members.length}m
+                                      </span>
+                                      {(cb.aliases ?? []).length > 0 && (
+                                        <span className="tag" style={{ fontSize: 9, padding: '1px 4px', color: 'var(--text-2)' }}>
+                                          +{(cb.aliases ?? []).length}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
                 </div>
-              )
-            })}
-            {tab === 'payload' && payloadScripts.map((ps, idx) => {
-              const selected = selPayload === idx
-              return (
-                <div key={idx}
-                  onClick={() => setSelPayload(idx)}
-                  style={{
-                    padding: '9px 12px',
-                    cursor: 'pointer',
-                    borderBottom: '1px solid var(--border)',
-                    background: selected ? 'var(--bg-panel)' : 'transparent',
-                    borderLeft: selected ? '2px solid var(--accent)' : '2px solid transparent',
-                    transition: 'background 0.1s',
-                    opacity: ps.enabled ? 1 : 0.55,
-                  }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{
-                      fontSize: 13, fontWeight: selected ? 500 : 400,
-                      color: ps.name ? 'var(--text)' : 'var(--text-3)',
-                      flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                    }}>{ps.name || '未命名脚本'}</span>
-                    {!ps.enabled && (
-                      <span className="tag" style={{ fontSize: 10, padding: '1px 5px', color: 'var(--text-3)' }}>已禁用</span>
-                    )}
-                    {selected && <IconChevronRight />}
+              )}
+
+              {/* ── Payload Scripts List ── */}
+              {tab === 'payload' && payloadScripts.map((ps, idx) => {
+                const selected = selPayload === idx
+                return (
+                  <div key={idx}
+                    onClick={() => setSelPayload(idx)}
+                    style={{
+                      padding: '9px 12px',
+                      cursor: 'pointer',
+                      borderBottom: '1px solid var(--border)',
+                      background: selected ? 'var(--bg-panel)' : 'transparent',
+                      borderLeft: selected ? '3px solid var(--accent)' : '3px solid transparent',
+                      transition: 'background 0.1s',
+                      opacity: ps.enabled ? 1 : 0.55,
+                    }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span style={{
+                        fontSize: 13, fontWeight: selected ? 500 : 400,
+                        color: ps.name ? 'var(--text)' : 'var(--text-3)',
+                        flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}>{ps.name || '未命名脚本'}</span>
+                      {!ps.enabled && (
+                        <span className="tag" style={{ fontSize: 10, padding: '1px 5px', color: 'var(--text-3)' }}>已禁用</span>
+                      )}
+                      {selected && <IconChevronRight />}
+                    </div>
                   </div>
-                </div>
-              )
-            })}
+                )
+              })}
+            </div>
           </div>
-        </div>
+        )}
 
         {/* ── Detail panel ── */}
         <div style={{ flex: 1, overflowY: 'auto', padding: '20px 28px' }}>
@@ -974,6 +1407,10 @@ export default function ConfigEditor() {
                   <span style={{ fontSize: 16, fontWeight: 600 }}>
                     {curCombo.name || <span style={{ color: 'var(--text-3)', fontStyle: 'italic' }}>未命名 Combo</span>}
                   </span>
+                  <span className="tag" style={{ fontSize: 11, color: 'var(--accent)', background: 'var(--accent-light)' }}>
+                    分组: {curCombo.owned_by || 'default'}
+                    {(curCombo.is_default || curCombo.owned_by === 'default' || !curCombo.owned_by) ? ' (默认)' : ''}
+                  </span>
                   <div style={{ marginLeft: 'auto' }}>
                     <button className="btn-icon" title="删除此 Combo"
                       onClick={() => removeCombo(selCombo)}
@@ -985,13 +1422,14 @@ export default function ConfigEditor() {
                 <ComboDetail
                   cb={curCombo}
                   providerNames={providerNames}
+                  existingGroups={existingGroups}
                   onUpdate={patch => updateCombo(selCombo, patch)}
                 />
               </div>
             ) : (
               <div className="empty-state" style={{ paddingTop: 80 }}>
                 <div style={{ marginBottom: 12 }}>还没有 Combo</div>
-                <button className="btn-primary" onClick={addCombo}><IconPlus /> 添加第一个 Combo</button>
+                <button className="btn-primary" onClick={() => addCombo()}><IconPlus /> 添加第一个 Combo</button>
               </div>
             )
           )}

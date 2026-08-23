@@ -24,14 +24,38 @@ func NewRouter(combos []config.ComboConfig) *Router {
 	}
 	for i := range combos {
 		c := &combos[i]
-		r.combos[c.Name] = c
+		fullName := c.FullName()
+		r.combos[fullName] = c
+		r.rrIndices[fullName] = 0
+
+		// Register full aliases
 		for _, a := range c.Aliases {
-			r.aliases[a] = c.Name
+			var fullAlias string
+			if c.IsDefault || c.OwnedBy == "" {
+				fullAlias = a
+			} else {
+				fullAlias = c.OwnedBy + "/" + a
+			}
+			r.aliases[fullAlias] = fullName
 		}
-		r.rrIndices[c.Name] = 0
+
+		// For default group, optionally alias <owned_by>/<name> to <name> for convenience
+		if c.IsDefault && c.OwnedBy != "" {
+			prefixName := c.OwnedBy + "/" + c.Name
+			if prefixName != fullName {
+				r.aliases[prefixName] = fullName
+			}
+			for _, a := range c.Aliases {
+				prefixAlias := c.OwnedBy + "/" + a
+				if prefixAlias != a {
+					r.aliases[prefixAlias] = fullName
+				}
+			}
+		}
 	}
 	return r
 }
+
 
 func (r *Router) resolve(name string) string {
 	if canon, ok := r.aliases[name]; ok {

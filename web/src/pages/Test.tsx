@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { getConfig, FMT_ENDPOINT, normalizeFormats } from '../api/client'
-import type { AppConfig, ApiFormat } from '../api/client'
+import type { AppConfig, ApiFormat, ComboConfig } from '../api/client'
+
 
 type SendState = 'idle' | 'sending' | 'streaming' | 'done' | 'error'
 type OutputBlock = { type: 'thinking' | 'text'; content: string }
@@ -195,9 +196,31 @@ export default function TestPage() {
   useEffect(() => {
     getConfig().then(c => {
       setCfg(c)
-      if (c.combos.length > 0) {
-        setComboName(c.combos[0].name)
-        setFmt(normalizeFormats(c.combos[0].api_format)[0])
+      let list: ComboConfig[] = []
+      for (const item of c.combos as any[]) {
+        if (Array.isArray(item.combos)) {
+          const groupOwnedBy = item.owned_by || 'default'
+          const groupDefault = Boolean(item.default || item.is_default)
+          for (const inner of item.combos) {
+            list.push({
+              ...inner,
+              owned_by: inner.owned_by || groupOwnedBy,
+              is_default: inner.is_default ?? groupDefault,
+            })
+          }
+        } else {
+          list.push({
+            ...item,
+            owned_by: item.owned_by || 'default',
+            is_default: item.is_default ?? (item.owned_by === 'default' || !item.owned_by),
+          })
+        }
+      }
+      if (list.length > 0) {
+        const first = list[0]
+        const firstID = (first.is_default || first.owned_by === 'default' || !first.owned_by) ? first.name : `${first.owned_by}/${first.name}`
+        setComboName(firstID)
+        setFmt(normalizeFormats(first.api_format)[0])
       }
       // Pre-fill API key from general config if available
       const firstKey = c.general?.api_keys?.[0]?.key
@@ -205,18 +228,49 @@ export default function TestPage() {
     }).catch(() => {})
   }, [])
 
+  const getFullID = (c: ComboConfig) => {
+    const isDefault = c.is_default || c.owned_by === 'default' || !c.owned_by
+    return isDefault ? c.name : `${c.owned_by}/${c.name}`
+  }
+
+  const flatCombos: ComboConfig[] = useMemo(() => {
+    if (!cfg) return []
+    let list: ComboConfig[] = []
+    for (const item of cfg.combos as any[]) {
+      if (Array.isArray(item.combos)) {
+        const groupOwnedBy = item.owned_by || 'default'
+        const groupDefault = Boolean(item.default || item.is_default)
+        for (const inner of item.combos) {
+          list.push({
+            ...inner,
+            owned_by: inner.owned_by || groupOwnedBy,
+            is_default: inner.is_default ?? groupDefault,
+          })
+        }
+      } else {
+        list.push({
+          ...item,
+          owned_by: item.owned_by || 'default',
+          is_default: item.is_default ?? (item.owned_by === 'default' || !item.owned_by),
+        })
+      }
+    }
+    return list
+  }, [cfg])
+
   // When combo changes, default format to its first format
-  const handleComboChange = (name: string) => {
-    setComboName(name)
-    if (!cfg) return
-    const cb = cfg.combos.find(c => c.name === name)
+  const handleComboChange = (fullID: string) => {
+    setComboName(fullID)
+    const cb = flatCombos.find(c => getFullID(c) === fullID || c.name === fullID)
     if (cb) setFmt(normalizeFormats(cb.api_format)[0])
   }
 
   // Available formats for selected combo
-  const availableFormats: ApiFormat[] = cfg
-    ? normalizeFormats(cfg.combos.find(c => c.name === comboName)?.api_format ?? 'openai')
+  const selectedCombo = flatCombos.find(c => getFullID(c) === comboName || c.name === comboName)
+  const availableFormats: ApiFormat[] = selectedCombo
+    ? normalizeFormats(selectedCombo.api_format ?? 'openai')
     : ['openai']
+
 
   // When testing the Anthropic format, at least one auth header must stay
   // checked (both may be checked to test upstreams that only accept one
@@ -395,8 +449,16 @@ export default function TestPage() {
                     onChange={e => handleComboChange(e.target.value)}
                     disabled={state === 'streaming' || state === 'sending'}
                   >
-                    {cfg?.combos.length === 0 && <option value="">— 暂无 combo —</option>}
-                    {cfg?.combos.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+                    {flatCombos.length === 0 && <option value="">— 暂无 combo —</option>}
+                    {flatCombos.map(c => {
+                      const fullID = getFullID(c)
+                      const isDef = c.is_default || c.owned_by === 'default' || !c.owned_by
+                      return (
+                        <option key={fullID} value={fullID}>
+                          {fullID}{isDef ? ' (默认)' : ` (${c.owned_by})`}
+                        </option>
+                      )
+                    })}
                   </select>
                 </div>
 

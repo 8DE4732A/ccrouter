@@ -14,8 +14,8 @@
 providers:           # list，至少一个 ProviderConfig
   - <ProviderConfig>
 
-combos:              # list，至少一个 ComboConfig
-  - <ComboConfig>
+combos:              # list，至少一个 ComboGroup 或 ComboConfig
+  - <ComboGroupConfig | ComboConfig>
 
 verbose_logging:     [bool, default=false]
                      # 是否将完整请求报文写入 cwd/logs/requests.jsonl
@@ -88,13 +88,28 @@ HealthCheckRule:
 
 
 # ===========================================================================
+# ComboGroupConfig (分组结构)
+# ===========================================================================
+# 对 Combos 进行命名空间分组（owned_by）。
+# - 默认分组：owned_by 为 "default" 或 default: true；客户端请求直接使用 combo 名称（如 fast），无前缀。
+# - 非默认分组：如 owned_by: "team-a"；客户端请求必须使用 <owned_by>/<combo_name>（如 team-a/fast）。
+# - 分组 ID 会如实反映在 GET /v1/models 返回的 owned_by 字段中。
+
+ComboGroupConfig:
+  owned_by:    [string, default="default"] # 分组标识符，不可包含 '/'
+  default:     [bool, default=false]       # 是否设为默认分组（无前缀访问）
+  combos:      <list[ComboConfig]>         # 本分组下的 combo 列表
+
+
+# ===========================================================================
 # ComboConfig
 # ===========================================================================
 # 客户端使用的「虚拟模型名」。
-# 请求体的 model 字段填 combo 名称，代理路由后改写为 member 的真实 model。
+# 请求体的 model 字段填 combo 名称（非默认分组带 <owned_by>/ 前缀），代理路由后改写为 member 的真实 model。
 
 ComboConfig:
-  name:        <string>                    # 唯一标识符，即客户端传的 model 值
+  name:        <string>                    # 组内唯一标识符
+  owned_by:    [string, default="default"] # 所属分组 ID（在平铺配置模式下使用）
   api_format:  <format | list[format]>     # 单值或列表，决定此 combo 接受哪些客户端格式
                                            # 可选值：openai | anthropic | openai-responses | openai-images
                                            # openai           → /v1/chat/completions
@@ -106,6 +121,7 @@ ComboConfig:
                                            # round-robin：每次请求轮询 member
   members:     <list[ComboMember]>         # 至少一个
   aliases:     [list[string], default=[]] # 额外的客户端可用名称（透明转发到本 combo）
+
 
 
 # ===========================================================================

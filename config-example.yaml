@@ -55,66 +55,84 @@ providers:
         models: []
 
 combos:
-  # -----------------------------------------------------------------------
-  # 单格式 combo：仅接受 OpenAI Chat Completions 格式
-  # 客户端传 model="fast" 即可；代理自动路由并改写真实 model 字段
-  # -----------------------------------------------------------------------
-  - name: "fast"
-    api_format: openai               # 单个字符串或列表均可
-    strategy: "fill-first"           # fill-first 优先第一个 member，耗尽才切换
-    members:
-      - provider: sensenova
-        model: "deepseek-v4-flash"
-      - provider: deepseek           # sensenova 耗尽后的备用
-        model: "deepseek-chat"
+  # =======================================================================
+  # 默认分组（owned_by: "default" 或 default: true）
+  # 客户端请求直接使用 combo 名称，如 model="fast" 或 model="smart"（无前缀）
+  # =======================================================================
+  - owned_by: "default"
+    default: true
+    combos:
+      # -------------------------------------------------------------------
+      # 单格式 combo：仅接受 OpenAI Chat Completions 格式
+      # -------------------------------------------------------------------
+      - name: "fast"
+        api_format: openai               # 单个字符串或列表均可
+        strategy: "fill-first"           # fill-first 优先第一个 member，耗尽才切换
+        members:
+          - provider: sensenova
+            model: "deepseek-v4-flash"
+          - provider: deepseek           # sensenova 耗尽后的备用
+            model: "deepseek-chat"
 
-  # -----------------------------------------------------------------------
-  # 多格式 combo：同一 combo 名同时服务 openai 和 anthropic 请求
-  # provider 原生支持两种格式时直接转发，无需翻译
-  # -----------------------------------------------------------------------
-  - name: "smart"
-    api_format:
-      - openai
-      - anthropic
-    strategy: "fill-first"
-    members:
-      - provider: sensenova
-        model: "deepseek-v4-flash"
-    aliases:
-      - "deepseek-v4-flash"          # 客户端也可以用原始模型名访问
+      # -------------------------------------------------------------------
+      # 多格式 combo：同一 combo 名同时服务 openai 和 anthropic 请求
+      # -------------------------------------------------------------------
+      - name: "smart"
+        api_format:
+          - openai
+          - anthropic
+        strategy: "fill-first"
+        members:
+          - provider: sensenova
+            model: "deepseek-v4-flash"
+        aliases:
+          - "deepseek-v4-flash"          # 客户端也可以用原始模型名访问
 
-  # -----------------------------------------------------------------------
-  # 跨格式翻译 combo：combo 接受 anthropic 格式，但 provider 只有 openai 接口
-  # 设置 upstream_api_format: openai 后，ccrouter 自动通过 CLIProxyAPI translator
-  # 将 anthropic 请求翻译为 openai，将 openai 响应翻译回 anthropic
-  # -----------------------------------------------------------------------
-  - name: "fast-ant"
-    api_format: anthropic
-    strategy: "fill-first"
-    members:
-      - provider: deepseek
-        model: "deepseek-chat"
-        upstream_api_format: openai  # deepseek 只有 openai 端点，翻译后转发
+      # -------------------------------------------------------------------
+      # 跨格式翻译 combo：combo 接受 anthropic 格式，但 provider 只有 openai 接口
+      # -------------------------------------------------------------------
+      - name: "fast-ant"
+        api_format: anthropic
+        strategy: "fill-first"
+        members:
+          - provider: deepseek
+            model: "deepseek-chat"
+            upstream_api_format: openai  # deepseek 只有 openai 端点，翻译后转发
 
-  # -----------------------------------------------------------------------
-  # Responses API 格式 combo
-  # -----------------------------------------------------------------------
-  - name: "fast-resp"
-    api_format: openai-responses
-    strategy: "fill-first"
-    members:
-      - provider: sensenova
-        model: "deepseek-v4-flash"
+      # -------------------------------------------------------------------
+      # Responses API 格式 combo
+      # -------------------------------------------------------------------
+      - name: "fast-resp"
+        api_format: openai-responses
+        strategy: "fill-first"
+        members:
+          - provider: sensenova
+            model: "deepseek-v4-flash"
 
-  # -----------------------------------------------------------------------
-  # 图像生成 combo
-  # -----------------------------------------------------------------------
-  - name: "image"
-    api_format: openai-images
-    strategy: "fill-first"
-    members:
-      - provider: sensenova
-        model: "sensenova-u1-fast"
+      # -------------------------------------------------------------------
+      # 图像生成 combo
+      # -------------------------------------------------------------------
+      - name: "image"
+        api_format: openai-images
+        strategy: "fill-first"
+        members:
+          - provider: sensenova
+            model: "sensenova-u1-fast"
+
+  # =======================================================================
+  # 自定义命名空间分组（如 team-a）
+  # 客户端请求必须使用 <owned_by>/<combo_name> 进行区分，如 model="team-a/fast"
+  # /v1/models 会返回 id="team-a/fast", owned_by="team-a"
+  # =======================================================================
+  - owned_by: "team-a"
+    combos:
+      - name: "fast"
+        api_format: openai
+        strategy: "fill-first"
+        members:
+          - provider: deepseek
+            model: "deepseek-chat"
+
 
 # ---------------------------------------------------------------------------
 # 详细日志（可选，默认 false）

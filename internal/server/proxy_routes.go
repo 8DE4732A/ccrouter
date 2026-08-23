@@ -16,12 +16,17 @@ func listModels(c *gin.Context, state *gateway.State) {
 	models := []map[string]any{}
 	for i := range svc.Config.Combos {
 		combo := &svc.Config.Combos[i]
-		for _, id := range append([]string{combo.Name}, combo.Aliases...) {
+		ownedBy := combo.OwnedBy
+		if ownedBy == "" {
+			ownedBy = "default"
+		}
+		ids := append([]string{combo.FullName()}, combo.FullAliases()...)
+		for _, id := range ids {
 			models = append(models, map[string]any{
 				"id":       id,
 				"object":   "model",
 				"created":  0,
-				"owned_by": "sense-roll",
+				"owned_by": ownedBy,
 			})
 		}
 	}

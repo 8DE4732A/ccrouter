@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { NavLink, Route, Routes } from 'react-router-dom'
 import './App.css'
 import Overview from './pages/Overview'
@@ -66,37 +67,87 @@ function IconLog() {
   )
 }
 
+function IconSidebarCollapse() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="2" y="2" width="12" height="12" rx="1.5"/>
+      <line x1="6" y1="2" x2="6" y2="14"/>
+      <polyline points="11 6 9 8 11 10"/>
+    </svg>
+  )
+}
+
+function IconSidebarExpand() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <rect x="2" y="2" width="12" height="12" rx="1.5"/>
+      <line x1="6" y1="2" x2="6" y2="14"/>
+      <polyline points="9 6 11 8 9 10"/>
+    </svg>
+  )
+}
+
 export default function App() {
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem('ccrouter_sidebar_collapsed') === 'true'
+    } catch {
+      return false
+    }
+  })
+
+  const toggleCollapsed = () => {
+    setCollapsed(prev => {
+      const next = !prev
+      try {
+        localStorage.setItem('ccrouter_sidebar_collapsed', String(next))
+      } catch {}
+      return next
+    })
+  }
+
   return (
     <div className="layout">
-      <nav className="sidebar">
+      <nav className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
         <div className="brand">
-          <div className="brand-name">sense-roll</div>
-          <div className="brand-sub">Admin</div>
+          <div className="brand-text">
+            <div className="brand-name">ccrouter</div>
+            <div className="brand-sub">Admin</div>
+          </div>
+          <button
+            className="sidebar-toggle-btn"
+            onClick={toggleCollapsed}
+            title={collapsed ? '展开菜单' : '收起菜单'}
+            aria-label={collapsed ? '展开菜单' : '收起菜单'}
+          >
+            {collapsed ? <IconSidebarExpand /> : <IconSidebarCollapse />}
+          </button>
         </div>
         <div className="nav-section">
           <div className="nav-label">监控</div>
-          <NavLink to="/" end className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>
-            <IconChart />概览
+          <NavLink to="/" end className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '概览' : undefined}>
+            <IconChart /><span>概览</span>
           </NavLink>
-          <NavLink to="/requests" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>
-            <IconList />请求明细
+          <NavLink to="/requests" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '请求明细' : undefined}>
+            <IconList /><span>请求明细</span>
           </NavLink>
-          <NavLink to="/logs" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>
-            <IconLog />日志
+          <NavLink to="/logs" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '日志' : undefined}>
+            <IconLog /><span>日志</span>
           </NavLink>
           <div className="nav-label" style={{ marginTop: 16 }}>管理</div>
-          <NavLink to="/config" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>
-            <IconSettings />配置
+          <NavLink to="/config" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '配置' : undefined}>
+            <IconSettings /><span>配置</span>
           </NavLink>
-          <NavLink to="/test" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>
-            <IconFlask />测试
+          <NavLink to="/test" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '测试' : undefined}>
+            <IconFlask /><span>测试</span>
           </NavLink>
-          <NavLink to="/info" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}>
-            <IconInfo />信息
+          <NavLink to="/info" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '信息' : undefined}>
+            <IconInfo /><span>信息</span>
           </NavLink>
         </div>
-        <div className="sidebar-footer">v0.1</div>
+        <div className="sidebar-footer">
+          <span>ccrouter</span> v0.1
+        </div>
       </nav>
       <main className="content">
         <Routes>

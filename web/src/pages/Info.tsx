@@ -62,62 +62,76 @@ export default function InfoPage() {
           可用模型（Combo）
         </h2>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          {info.combos.map(c => (
-            <div key={c.name} style={{
-              background: 'var(--bg-panel)',
-              border: '1px solid var(--border)',
-              borderRadius: 8,
-              padding: '14px 18px',
-            }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
-                {/* Name + aliases */}
-                <div style={{ flex: 1, minWidth: 180 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
-                    <code style={{
-                      fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600,
-                      color: 'var(--accent)', background: 'var(--accent-light)',
-                      padding: '2px 8px', borderRadius: 4,
-                    }}>{c.name}</code>
-                    {(c.aliases ?? []).map(a => (
-                      <code key={a} style={{
-                        fontFamily: 'var(--font-mono)', fontSize: 12,
-                        color: 'var(--text-2)', background: 'var(--bg)',
-                        border: '1px solid var(--border-md)',
-                        padding: '1px 7px', borderRadius: 4,
-                      }}>{a}</code>
-                    ))}
-                  </div>
-                  <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {c.api_formats.map(f => (
-                      <span key={f} className={`tag ${(FMT_COLOR as Record<string, string>)[f] ?? ''}`} style={{ fontSize: 10 }}>{f}</span>
-                    ))}
-                    <span className="tag" style={{ fontSize: 10 }}>{c.strategy}</span>
-                  </div>
-                </div>
-
-                {/* Members */}
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 240 }}>
-                  {c.members.map((m, i) => (
-                    <div key={i} style={{
-                      display: 'flex', alignItems: 'center', gap: 8,
-                      fontSize: 12, color: 'var(--text-2)',
-                    }}>
-                      <span style={{
-                        width: 18, height: 18, borderRadius: '50%',
-                        background: 'var(--bg)', border: '1px solid var(--border-md)',
-                        display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-                        fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-3)',
-                        flexShrink: 0,
-                      }}>{i + 1}</span>
-                      <span style={{ color: 'var(--text-3)' }}>{m.provider}</span>
-                      <span style={{ color: 'var(--border-md)' }}>›</span>
-                      <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>{m.model}</code>
+          {info.combos.map(c => {
+            const isDefault = c.is_default || c.owned_by === 'default' || !c.owned_by
+            const fullID = c.full_id || (isDefault ? c.name : `${c.owned_by}/${c.name}`)
+            return (
+              <div key={fullID} style={{
+                background: 'var(--bg-panel)',
+                border: '1px solid var(--border)',
+                borderRadius: 8,
+                padding: '14px 18px',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 12, flexWrap: 'wrap' }}>
+                  {/* Name + aliases */}
+                  <div style={{ flex: 1, minWidth: 180 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 4 }}>
+                      <code style={{
+                        fontFamily: 'var(--font-mono)', fontSize: 14, fontWeight: 600,
+                        color: 'var(--accent)', background: 'var(--accent-light)',
+                        padding: '2px 8px', borderRadius: 4,
+                      }}>{fullID}</code>
+                      <span className="tag" style={{
+                        fontSize: 10, padding: '1px 6px',
+                        color: isDefault ? 'var(--text-3)' : 'var(--accent)',
+                        background: isDefault ? 'var(--bg)' : 'var(--accent-light)',
+                      }}>
+                        {c.owned_by || 'default'}{isDefault ? ' (默认)' : ''}
+                      </span>
+                      {(c.aliases ?? []).map(a => {
+                        const fullAlias = isDefault ? a : `${c.owned_by}/${a}`
+                        return (
+                          <code key={a} style={{
+                            fontFamily: 'var(--font-mono)', fontSize: 12,
+                            color: 'var(--text-2)', background: 'var(--bg)',
+                            border: '1px solid var(--border-md)',
+                            padding: '1px 7px', borderRadius: 4,
+                          }}>{fullAlias}</code>
+                        )
+                      })}
                     </div>
-                  ))}
+                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      {c.api_formats.map(f => (
+                        <span key={f} className={`tag ${(FMT_COLOR as Record<string, string>)[f] ?? ''}`} style={{ fontSize: 10 }}>{f}</span>
+                      ))}
+                      <span className="tag" style={{ fontSize: 10 }}>{c.strategy}</span>
+                    </div>
+                  </div>
+
+                  {/* Members */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, minWidth: 240 }}>
+                    {c.members.map((m, i) => (
+                      <div key={i} style={{
+                        display: 'flex', alignItems: 'center', gap: 8,
+                        fontSize: 12, color: 'var(--text-2)',
+                      }}>
+                        <span style={{
+                          width: 18, height: 18, borderRadius: '50%',
+                          background: 'var(--bg)', border: '1px solid var(--border-md)',
+                          display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                          fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-3)',
+                          flexShrink: 0,
+                        }}>{i + 1}</span>
+                        <span style={{ color: 'var(--text-3)' }}>{m.provider}</span>
+                        <span style={{ color: 'var(--border-md)' }}>›</span>
+                        <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>{m.model}</code>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       </section>
 

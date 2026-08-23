@@ -139,17 +139,36 @@ providers:
 
 ### `combos`
 
+Combos 支持通过 `owned_by` 进行命名空间分组（如团队、业务线或权限隔离）：
+
+- **默认分组**：`owned_by: "default"` 或 `default: true`。客户端请求时不带前缀（直接传 `model: "fast"`），`/v1/models` 返回的 `owned_by` 为 `default`。
+- **自定义分组**：如 `owned_by: "team-a"`。客户端请求时必须传 `<owned_by>/<combo_name>`（如 `model: "team-a/fast"`），`/v1/models` 返回 `id: "team-a/fast"`, `owned_by: "team-a"`。
+
 ```yaml
 combos:
-  - name: "fast"                  # 客户端请求时 model 字段填此值
-    api_format: openai            # 单值或列表；决定监听哪些代理端点
-    strategy: "fill-first"        # fill-first（默认）| round-robin
-    aliases: ["gpt-4o", "claude"] # 可选；这些名称也路由到本 combo
-    members:
-      - provider: sensenova
-        model: "deepseek-v4-flash"
-      - provider: deepseek        # 前一个成员所有 key 耗尽后的备用
-        model: "deepseek-chat"
+  # 默认分组（请求直接传 model="fast" 或别名）
+  - owned_by: "default"
+    default: true
+    combos:
+      - name: "fast"                  # 客户端请求时 model 字段填此值
+        api_format: openai            # 单值或列表；决定监听哪些代理端点
+        strategy: "fill-first"        # fill-first（默认）| round-robin
+        aliases: ["gpt-4o", "claude"] # 可选；这些名称也路由到本 combo
+        members:
+          - provider: sensenova
+            model: "deepseek-v4-flash"
+          - provider: deepseek        # 前一个成员所有 key 耗尽后的备用
+            model: "deepseek-chat"
+
+  # 命名空间分组（请求必须传 model="team-a/fast"）
+  - owned_by: "team-a"
+    combos:
+      - name: "fast"
+        api_format: openai
+        strategy: "fill-first"
+        members:
+          - provider: deepseek
+            model: "deepseek-chat"
 ```
 
 `api_format` 支持列表，使同一 Combo 同时服务多个端点：
@@ -159,6 +178,7 @@ api_format:
   - openai      # → POST /v1/chat/completions
   - anthropic   # → POST /v1/messages
 ```
+
 
 ### Payload 改写脚本
 

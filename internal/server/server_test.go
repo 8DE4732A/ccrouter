@@ -326,3 +326,72 @@ func TestAPIKeyAuthBothHeaders(t *testing.T) {
 		}
 	})
 }
+
+func TestListModelsOwnedBy(t *testing.T) {
+	configYAML := `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - owned_by: default
+    default: true
+    combos:
+      - name: fast
+        api_format: openai
+        members: [{provider: sn, model: deepseek-flash}]
+        aliases: ["fast-alias"]
+  - owned_by: team-a
+    combos:
+      - name: smart
+        api_format: openai
+        members: [{provider: sn, model: deepseek-chat}]
+        aliases: ["smart-alias"]
+`
+	st, _ := newTestStateWithYAML(t, configYAML)
+	r := Router(st)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/v1/models", nil)
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("models: expected 200, got %d", rec.Code)
+	}
+
+	var resp struct {
+		Object string `json:"object"`
+		Data   []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal /v1/models response: %v", err)
+	}
+
+	modelMap := map[string]string{}
+	for _, m := range resp.Data {
+		modelMap[m.ID] = m.OwnedBy
+	}
+
+	// Default group models: no prefix, owned_by is "default"
+	if modelMap["fast"] != "default" {
+		t.Fatalf("expected 'fast' to have owned_by 'default', got %q", modelMap["fast"])
+	}
+	if modelMap["fast-alias"] != "default" {
+		t.Fatalf("expected 'fast-alias' to have owned_by 'default', got %q", modelMap["fast-alias"])
+	}
+
+	// team-a models: "team-a/smart" and "team-a/smart-alias", owned_by is "team-a"
+	if modelMap["team-a/smart"] != "team-a" {
+		t.Fatalf("expected 'team-a/smart' to have owned_by 'team-a', got %q", modelMap["team-a/smart"])
+	}
+	if modelMap["team-a/smart-alias"] != "team-a" {
+		t.Fatalf("expected 'team-a/smart-alias' to have owned_by 'team-a', got %q", modelMap["team-a/smart-alias"])
+	}
+}
+

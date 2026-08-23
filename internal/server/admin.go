@@ -160,8 +160,15 @@ func adminInfo(c *gin.Context) {
 		if aliases == nil {
 			aliases = []string{}
 		}
+		ownedBy := combo.OwnedBy
+		if ownedBy == "" {
+			ownedBy = "default"
+		}
 		combos = append(combos, map[string]any{
 			"name":        combo.Name,
+			"owned_by":    ownedBy,
+			"is_default":  combo.IsDefault,
+			"full_id":     combo.FullName(),
 			"aliases":     aliases,
 			"api_formats": combo.APIFormats(),
 			"strategy":    combo.Strategy,

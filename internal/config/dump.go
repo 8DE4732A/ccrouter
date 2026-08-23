@@ -96,8 +96,19 @@ func Dump(cfg *AppConfig) map[string]any {
 		providers = append(providers, pm)
 	}
 
-	combos := make([]any, 0, len(cfg.Combos))
+	type groupEntry struct {
+		ownedBy string
+		isDef   bool
+		items   []any
+	}
+	var groupList []groupEntry
+	groupIndex := map[string]int{}
+
 	for _, c := range cfg.Combos {
+		ownedBy := c.OwnedBy
+		if ownedBy == "" {
+			ownedBy = "default"
+		}
 		members := make([]any, 0, len(c.Members))
 		for _, m := range c.Members {
 			mm := map[string]any{"provider": m.Provider, "model": m.Model}
@@ -119,8 +130,33 @@ func Dump(cfg *AppConfig) map[string]any {
 			}
 			combo["aliases"] = aliases
 		}
-		combos = append(combos, combo)
+
+		idx, exists := groupIndex[ownedBy]
+		if !exists {
+			idx = len(groupList)
+			groupIndex[ownedBy] = idx
+			groupList = append(groupList, groupEntry{
+				ownedBy: ownedBy,
+				isDef:   c.IsDefault,
+				items:   []any{combo},
+			})
+		} else {
+			groupList[idx].items = append(groupList[idx].items, combo)
+		}
 	}
+
+	combos := make([]any, 0, len(groupList))
+	for _, g := range groupList {
+		grp := map[string]any{
+			"owned_by": g.ownedBy,
+			"combos":   g.items,
+		}
+		if g.isDef {
+			grp["default"] = true
+		}
+		combos = append(combos, grp)
+	}
+
 
 	scripts := make([]any, 0, len(cfg.PayloadScripts))
 	for _, s := range cfg.PayloadScripts {

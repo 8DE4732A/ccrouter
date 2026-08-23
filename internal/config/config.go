@@ -185,10 +185,45 @@ type ComboMember struct {
 
 type ComboConfig struct {
 	Name      string        `json:"name" yaml:"name"`
+	OwnedBy   string        `json:"owned_by,omitempty" yaml:"owned_by,omitempty"`
+	IsDefault bool          `json:"is_default,omitempty" yaml:"is_default,omitempty"`
 	APIFormat any           `json:"api_format" yaml:"api_format"` // string or []string
 	Strategy  string        `json:"strategy" yaml:"strategy"`
 	Members   []ComboMember `json:"members" yaml:"members"`
 	Aliases   []string      `json:"aliases,omitempty" yaml:"aliases,omitempty"`
+}
+
+// FullName returns the primary model identifier for routing and /v1/models:
+// for default group: Name
+// for non-default group: OwnedBy + "/" + Name
+func (c *ComboConfig) FullName() string {
+	if c.IsDefault || c.OwnedBy == "" {
+		return c.Name
+	}
+	return c.OwnedBy + "/" + c.Name
+}
+
+// FullAliases returns the alias model identifiers:
+// for default group: Aliases
+// for non-default group: OwnedBy + "/" + alias
+func (c *ComboConfig) FullAliases() []string {
+	if len(c.Aliases) == 0 {
+		return nil
+	}
+	if c.IsDefault || c.OwnedBy == "" {
+		return c.Aliases
+	}
+	out := make([]string, len(c.Aliases))
+	for i, a := range c.Aliases {
+		out[i] = c.OwnedBy + "/" + a
+	}
+	return out
+}
+
+type ComboGroupConfig struct {
+	OwnedBy string        `json:"owned_by" yaml:"owned_by"`
+	Default bool          `json:"default,omitempty" yaml:"default,omitempty"`
+	Combos  []ComboConfig `json:"combos" yaml:"combos"`
 }
 
 // APIFormats derives the accepted API formats from the APIFormat field,
@@ -225,3 +260,4 @@ type AppConfig struct {
 	VerboseLogging bool             `json:"verbose_logging" yaml:"verbose_logging"`
 	PayloadScripts []PayloadScript  `json:"payload_scripts" yaml:"payload_scripts"`
 }
+

@@ -465,3 +465,133 @@ combos:
         model: m
 `)
 }
+
+func TestGroupedCombosWithOwnedBy(t *testing.T) {
+	raw := `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+    health_check_rules: []
+combos:
+  - owned_by: default
+    default: true
+    combos:
+      - name: fast
+        api_format: openai
+        members:
+          - provider: sn
+            model: deepseek-flash
+        aliases: ["fast-alias"]
+  - owned_by: team-a
+    combos:
+      - name: fast
+        api_format: openai
+        members:
+          - provider: sn
+            model: deepseek-chat
+        aliases: ["teama-alias"]
+`
+	cfg := loadFromText(t, raw)
+	if len(cfg.Combos) != 2 {
+		t.Fatalf("expected 2 combos, got %d", len(cfg.Combos))
+	}
+
+	c0 := cfg.Combos[0]
+	if c0.Name != "fast" || c0.OwnedBy != "default" || !c0.IsDefault {
+		t.Fatalf("c0 mismatch: %+v", c0)
+	}
+	if c0.FullName() != "fast" {
+		t.Fatalf("expected full name 'fast', got %q", c0.FullName())
+	}
+	if len(c0.FullAliases()) != 1 || c0.FullAliases()[0] != "fast-alias" {
+		t.Fatalf("unexpected full aliases: %v", c0.FullAliases())
+	}
+
+	c1 := cfg.Combos[1]
+	if c1.Name != "fast" || c1.OwnedBy != "team-a" || c1.IsDefault {
+		t.Fatalf("c1 mismatch: %+v", c1)
+	}
+	if c1.FullName() != "team-a/fast" {
+		t.Fatalf("expected full name 'team-a/fast', got %q", c1.FullName())
+	}
+	if len(c1.FullAliases()) != 1 || c1.FullAliases()[0] != "team-a/teama-alias" {
+		t.Fatalf("unexpected full aliases: %v", c1.FullAliases())
+	}
+
+	// Test dump roundtrip
+	dumped := Dump(cfg)
+	rebuilt, err := Build(dumped)
+	if err != nil {
+		t.Fatalf("rebuild grouped combos: %v", err)
+	}
+	if len(rebuilt.Combos) != 2 {
+		t.Fatalf("expected 2 combos after rebuild, got %d", len(rebuilt.Combos))
+	}
+	if rebuilt.Combos[0].FullName() != "fast" || rebuilt.Combos[1].FullName() != "team-a/fast" {
+		t.Fatalf("rebuilt combo names mismatch: %s, %s", rebuilt.Combos[0].FullName(), rebuilt.Combos[1].FullName())
+	}
+}
+
+func TestRejectsMultipleDefaultGroups(t *testing.T) {
+	mustReject(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - owned_by: g1
+    default: true
+    combos:
+      - name: fast
+        api_format: openai
+        members: [{provider: sn, model: m}]
+  - owned_by: g2
+    default: true
+    combos:
+      - name: fast
+        api_format: openai
+        members: [{provider: sn, model: m}]
+`)
+}
+
+func TestRejectsSlashInOwnedByOrName(t *testing.T) {
+	mustReject(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - owned_by: team/a
+    combos:
+      - name: fast
+        api_format: openai
+        members: [{provider: sn, model: m}]
+`)
+
+	mustReject(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - owned_by: teama
+    combos:
+      - name: group/fast
+        api_format: openai
+        members: [{provider: sn, model: m}]
+`)
+}
+

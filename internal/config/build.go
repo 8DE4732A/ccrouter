@@ -85,18 +85,151 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 	for i := range cfg.Providers {
 		providerMap[cfg.Providers[i].Name] = &cfg.Providers[i]
 	}
-	comboNames := map[string]bool{}
-	for i, cv := range combosRaw {
-		c, err := asMap(cv, fmt.Sprintf("combos[%d]", i))
-		if err != nil {
-			return nil, err
-		}
-		cc, err := buildCombo(c, i, providerMap, comboNames)
-		if err != nil {
-			return nil, err
-		}
-		cfg.Combos = append(cfg.Combos, *cc)
+
+	type parsedGroup struct {
+		ownedBy string
+		isDef   bool
+		combos  []*ComboConfig
 	}
+
+	var groups []*parsedGroup
+	groupMap := map[string]*parsedGroup{}
+
+	for i, cv := range combosRaw {
+		cm, err := asMap(cv, fmt.Sprintf("combos[%d]", i))
+		if err != nil {
+			return nil, err
+		}
+
+		// Check if this is a group (contains "combos" list)
+		if innerCombosRaw, isGroup := cm["combos"].([]any); isGroup {
+			ownedBy := strings.TrimSpace(strVal(cm["owned_by"]))
+			if ownedBy == "" {
+				ownedBy = "default"
+			}
+			if strings.Contains(ownedBy, "/") {
+				return nil, errf("combos[%d].owned_by %q must not contain '/'", i, ownedBy)
+			}
+			isDef := toBool(cm["default"]) || toBool(cm["is_default"])
+			if len(innerCombosRaw) == 0 {
+				return nil, errf("combos[%d] group %q must contain at least one combo", i, ownedBy)
+			}
+			grp, exists := groupMap[ownedBy]
+			if !exists {
+				grp = &parsedGroup{ownedBy: ownedBy, isDef: isDef}
+				groups = append(groups, grp)
+				groupMap[ownedBy] = grp
+			}
+			if isDef {
+				grp.isDef = true
+			}
+
+			groupComboNames := map[string]bool{}
+			for _, existing := range grp.combos {
+				groupComboNames[existing.Name] = true
+				for _, a := range existing.Aliases {
+					groupComboNames[a] = true
+				}
+			}
+
+			for j, innerCV := range innerCombosRaw {
+				innerCM, err := asMap(innerCV, fmt.Sprintf("combos[%d].combos[%d]", i, j))
+				if err != nil {
+					return nil, err
+				}
+				cc, err := buildCombo(innerCM, fmt.Sprintf("combos[%d].combos[%d]", i, j), providerMap, groupComboNames)
+				if err != nil {
+					return nil, err
+				}
+				cc.OwnedBy = ownedBy
+				grp.combos = append(grp.combos, cc)
+			}
+		} else {
+			// Flat combo
+			ownedBy := strings.TrimSpace(strVal(cm["owned_by"]))
+			if ownedBy == "" {
+				ownedBy = "default"
+			}
+			if strings.Contains(ownedBy, "/") {
+				return nil, errf("combos[%d].owned_by %q must not contain '/'", i, ownedBy)
+			}
+			isDef := toBool(cm["default"]) || toBool(cm["is_default"])
+
+			grp, exists := groupMap[ownedBy]
+			if !exists {
+				grp = &parsedGroup{ownedBy: ownedBy, isDef: isDef}
+				groups = append(groups, grp)
+				groupMap[ownedBy] = grp
+			}
+			if isDef {
+				grp.isDef = true
+			}
+
+			groupComboNames := map[string]bool{}
+			for _, existing := range grp.combos {
+				groupComboNames[existing.Name] = true
+				for _, a := range existing.Aliases {
+					groupComboNames[a] = true
+				}
+			}
+
+			cc, err := buildCombo(cm, fmt.Sprintf("combos[%d]", i), providerMap, groupComboNames)
+			if err != nil {
+				return nil, err
+			}
+			cc.OwnedBy = ownedBy
+			grp.combos = append(grp.combos, cc)
+		}
+	}
+
+	// Resolve the default group
+	defaultCount := 0
+	for _, grp := range groups {
+		if grp.isDef {
+			defaultCount++
+		}
+	}
+	if defaultCount > 1 {
+		return nil, errf("multiple default combo groups configured")
+	}
+	if defaultCount == 0 {
+		foundDefault := false
+		for _, grp := range groups {
+			if strings.EqualFold(grp.ownedBy, "default") {
+				grp.isDef = true
+				foundDefault = true
+				break
+			}
+		}
+		if !foundDefault && len(groups) > 0 {
+			groups[0].isDef = true
+		}
+	}
+
+	// Validate full IDs across all groups and assign to cfg.Combos
+	fullModelNames := map[string]bool{}
+	for _, grp := range groups {
+		for _, cc := range grp.combos {
+			cc.OwnedBy = grp.ownedBy
+			cc.IsDefault = grp.isDef
+
+			fullPrimary := cc.FullName()
+			if fullModelNames[fullPrimary] {
+				return nil, errf("duplicate model identifier %q across groups", fullPrimary)
+			}
+			fullModelNames[fullPrimary] = true
+
+			for _, fullAlias := range cc.FullAliases() {
+				if fullModelNames[fullAlias] {
+					return nil, errf("duplicate model identifier %q across groups", fullAlias)
+				}
+				fullModelNames[fullAlias] = true
+			}
+
+			cfg.Combos = append(cfg.Combos, *cc)
+		}
+	}
+
 
 	// ---- general ----
 	if v, ok := raw["general"]; ok && v != nil {
@@ -366,30 +499,36 @@ func buildRule(rm map[string]any, ctx string) (*HealthCheckRule, error) {
 	}, nil
 }
 
-func buildCombo(c map[string]any, idx int, providerMap map[string]*ProviderConfig, comboNames map[string]bool) (*ComboConfig, error) {
+func buildCombo(c map[string]any, ctx string, providerMap map[string]*ProviderConfig, comboNames map[string]bool) (*ComboConfig, error) {
 	name := strings.TrimSpace(strVal(c["name"]))
 	if name == "" {
-		return nil, errf("combos[%d].name must not be empty", idx)
+		return nil, errf("%s.name must not be empty", ctx)
+	}
+	if strings.Contains(name, "/") {
+		return nil, errf("%s.name %q must not contain '/'", ctx, name)
 	}
 	if comboNames[name] {
-		return nil, errf("duplicate combo name: %q", name)
+		return nil, errf("duplicate combo name: %q in %s", name, ctx)
 	}
 
 	cc := &ComboConfig{Name: name}
 
 	// aliases
 	if v, ok := c["aliases"]; ok {
-		aliases, err := asStringList(v, fmt.Sprintf("combos[%d].aliases", idx))
+		aliases, err := asStringList(v, fmt.Sprintf("%s.aliases", ctx))
 		if err != nil {
 			return nil, err
 		}
 		for _, a := range aliases {
 			a = strings.TrimSpace(a)
 			if a == "" {
-				return nil, errf("combos[%d].aliases entry must not be empty", idx)
+				return nil, errf("%s.aliases entry must not be empty", ctx)
+			}
+			if strings.Contains(a, "/") {
+				return nil, errf("%s.aliases %q must not contain '/'", ctx, a)
 			}
 			if comboNames[a] {
-				return nil, errf("combos[%d].aliases %q conflicts with an existing combo name or alias", idx, a)
+				return nil, errf("%s.aliases %q conflicts with an existing combo name or alias", ctx, a)
 			}
 			comboNames[a] = true
 			cc.Aliases = append(cc.Aliases, a)
@@ -397,18 +536,18 @@ func buildCombo(c map[string]any, idx int, providerMap map[string]*ProviderConfi
 	}
 
 	// api_format (string or list)
-	rawFormats, err := asStringList(c["api_format"], fmt.Sprintf("combos[%d].api_format", idx))
+	rawFormats, err := asStringList(c["api_format"], fmt.Sprintf("%s.api_format", ctx))
 	if err != nil {
 		return nil, err
 	}
 	if len(rawFormats) == 0 {
-		return nil, errf("combos[%d].api_format must be a non-empty string or list", idx)
+		return nil, errf("%s.api_format must be a non-empty string or list", ctx)
 	}
 	formats := []string{}
 	for _, f := range rawFormats {
 		f = lower(f)
 		if !validClientFormats[f] {
-			return nil, errf("combos[%d].api_format %q is not a valid client-facing format (valid: openai, anthropic, openai-responses, openai-images)", idx, f)
+			return nil, errf("%s.api_format %q is not a valid client-facing format (valid: openai, anthropic, openai-responses, openai-images)", ctx, f)
 		}
 		formats = append(formats, f)
 	}
@@ -419,30 +558,30 @@ func buildCombo(c map[string]any, idx int, providerMap map[string]*ProviderConfi
 		cc.Strategy = "fill-first"
 	}
 	if !validKeyStrategies[cc.Strategy] {
-		return nil, errf("combos[%d].strategy must be one of: fill-first, round-robin", idx)
+		return nil, errf("%s.strategy must be one of: fill-first, round-robin", ctx)
 	}
 
 	// members
 	membersRaw, ok := c["members"].([]any)
 	if !ok || len(membersRaw) == 0 {
-		return nil, errf("combos[%d] must contain at least one entry in 'members'", idx)
+		return nil, errf("%s must contain at least one entry in 'members'", ctx)
 	}
 	for j, mv := range membersRaw {
-		mm, err := asMap(mv, fmt.Sprintf("combos[%d].members[%d]", idx, j))
+		mm, err := asMap(mv, fmt.Sprintf("%s.members[%d]", ctx, j))
 		if err != nil {
 			return nil, err
 		}
 		providerName := strings.TrimSpace(strVal(mm["provider"]))
 		if providerName == "" {
-			return nil, errf("combos[%d].members[%d].provider must not be empty", idx, j)
+			return nil, errf("%s.members[%d].provider must not be empty", ctx, j)
 		}
 		prov, ok := providerMap[providerName]
 		if !ok {
-			return nil, errf("combos[%d].members[%d].provider %q is not defined in providers", idx, j, providerName)
+			return nil, errf("%s.members[%d].provider %q is not defined in providers", ctx, j, providerName)
 		}
 		model := strings.TrimSpace(strVal(mm["model"]))
 		if model == "" {
-			return nil, errf("combos[%d].members[%d].model must not be empty", idx, j)
+			return nil, errf("%s.members[%d].model must not be empty", ctx, j)
 		}
 
 		// upstream_api_format: optional hint for which upstream endpoint to prefer when the
@@ -451,11 +590,11 @@ func buildCombo(c map[string]any, idx int, providerMap map[string]*ProviderConfi
 		upstreamFmt := lower(strVal(mm["upstream_api_format"]))
 		if upstreamFmt != "" {
 			if !validAPIFormats[upstreamFmt] {
-				return nil, errf("combos[%d].members[%d].upstream_api_format %q is not a known format", idx, j, upstreamFmt)
+				return nil, errf("%s.members[%d].upstream_api_format %q is not a known format", ctx, j, upstreamFmt)
 			}
 			// The hint must actually exist on the provider (otherwise it's a typo).
 			if !prov.SupportsFormat(upstreamFmt) {
-				return nil, errf("combos[%d].members[%d].upstream_api_format %q is not available on provider %q", idx, j, upstreamFmt, providerName)
+				return nil, errf("%s.members[%d].upstream_api_format %q is not available on provider %q", ctx, j, upstreamFmt, providerName)
 			}
 		}
 		// Provider must support at least one API format (validated elsewhere), so we always
@@ -468,6 +607,7 @@ func buildCombo(c map[string]any, idx int, providerMap map[string]*ProviderConfi
 	comboNames[name] = true
 	return cc, nil
 }
+
 
 func formatsToConfig(f []string) any {
 	if len(f) == 1 {

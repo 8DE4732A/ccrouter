@@ -538,3 +538,78 @@ func TestBuildHeadersMirrorsClientAuthScheme(t *testing.T) {
 		}
 	})
 }
+
+func TestProxyOwnedByRouting(t *testing.T) {
+	var requestedUpstreamModel string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if m, ok := req["model"].(string); ok {
+			requestedUpstreamModel = m
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer up.Close()
+
+	cfg := &config.AppConfig{
+		Providers: []config.ProviderConfig{{
+			Name:        "p1",
+			APIs:        []config.ApiEndpoint{{APIFormat: "openai", BaseURL: up.URL}},
+			KeyStrategy: "fill-first",
+			Keys:        []config.KeyConfig{{Key: "key-1"}},
+		}},
+		Combos: []config.ComboConfig{
+			{
+				Name:      "fast",
+				OwnedBy:   "default",
+				IsDefault: true,
+				APIFormat: "openai",
+				Strategy:  "fill-first",
+				Members:   []config.ComboMember{{Provider: "p1", Model: "model-default"}},
+			},
+			{
+				Name:      "fast",
+				OwnedBy:   "team-a",
+				IsDefault: false,
+				APIFormat: "openai",
+				Strategy:  "fill-first",
+				Members:   []config.ComboMember{{Provider: "p1", Model: "model-teama"}},
+			},
+		},
+	}
+
+	kms := map[string]*keys.Manager{
+		"p1": keys.NewManager("p1", []string{"key-1"}, "fill-first"),
+	}
+	svc, err := New(cfg, kms, combos.NewRouter(cfg.Combos), map[string]*http.Client{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Request to default combo "fast" (no prefix)
+	rec := doRequest(t, svc, map[string]any{"model": "fast", "messages": []map[string]any{{"role": "user", "content": "hi"}}})
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if requestedUpstreamModel != "model-default" {
+		t.Fatalf("expected model-default, got %q", requestedUpstreamModel)
+	}
+
+	// 2. Request to team-a combo "team-a/fast" (with prefix)
+	rec = doRequest(t, svc, map[string]any{"model": "team-a/fast", "messages": []map[string]any{{"role": "user", "content": "hi"}}})
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if requestedUpstreamModel != "model-teama" {
+		t.Fatalf("expected model-teama, got %q", requestedUpstreamModel)
+	}
+
+	// 3. Request to unknown combo "team-b/fast" -> 400
+	rec = doRequest(t, svc, map[string]any{"model": "team-b/fast", "messages": []map[string]any{{"role": "user", "content": "hi"}}})
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for unknown combo, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+

@@ -89,6 +89,9 @@ export function normalizeFormats(v: ApiFormat | ApiFormat[]): ApiFormat[] {
 
 export type ComboConfig = {
   name: string
+  owned_by?: string
+  default?: boolean
+  is_default?: boolean
   api_format: ApiFormat | ApiFormat[]
   strategy: 'fill-first' | 'round-robin'
   members: ComboMember[]
@@ -213,11 +216,15 @@ export const getRequests = (params: {
 // ---- Info ----
 export type InfoCombo = {
   name: string
+  owned_by?: string
+  is_default?: boolean
+  full_id?: string
   aliases: string[]
   api_formats: string[]
   strategy: string
   members: { provider: string; model: string }[]
 }
+
 export type InfoProvider = {
   name: string
   api_formats: string[]
