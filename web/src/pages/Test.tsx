@@ -64,11 +64,24 @@ function parseUsage(text: string, fmt: ApiFormat): { prompt?: number; completion
   } catch { return null }
 }
 
-function extractStreamText(chunk: string, fmt: ApiFormat): { text?: string; thinking?: string; usage?: ReturnType<typeof parseUsage> } {
+type UsageInfo = { prompt?: number; completion?: number; total?: number }
+
+function mergeUsage(prev?: UsageInfo | null, curr?: UsageInfo | null): UsageInfo | undefined {
+  if (!curr && !prev) return undefined
+  if (!curr) return prev ?? undefined
+  if (!prev) return curr ?? undefined
+
+  const p = (curr.prompt != null && (curr.prompt > 0 || prev.prompt == null)) ? curr.prompt : prev.prompt
+  const c = curr.completion ?? prev.completion
+  const tot = curr.total ?? ((p != null || c != null) ? ((p ?? 0) + (c ?? 0)) : undefined)
+  return { prompt: p, completion: c, total: tot }
+}
+
+function extractStreamText(chunk: string, fmt: ApiFormat): { text?: string; thinking?: string; usage?: UsageInfo } {
   const lines = chunk.split('\n')
   let text = ''
   let thinkingText = ''
-  let usage: ReturnType<typeof parseUsage> = null
+  let usage: UsageInfo | undefined = undefined
   for (const line of lines) {
     if (!line.startsWith('data: ')) continue
     const data = line.slice(6).trim()
@@ -79,7 +92,7 @@ function extractStreamText(chunk: string, fmt: ApiFormat): { text?: string; thin
         const delta = obj.choices?.[0]?.delta
         if (delta?.content) text += delta.content
         if (delta?.reasoning_content) thinkingText += delta.reasoning_content
-        if (obj.usage) usage = { prompt: obj.usage.prompt_tokens, completion: obj.usage.completion_tokens, total: obj.usage.total_tokens }
+        if (obj.usage) usage = mergeUsage(usage, { prompt: obj.usage.prompt_tokens, completion: obj.usage.completion_tokens, total: obj.usage.total_tokens })
       } else if (fmt === 'anthropic') {
         if (obj.type === 'content_block_delta') {
           if (obj.delta?.type === 'thinking_delta') thinkingText += obj.delta.thinking ?? ''
@@ -87,13 +100,22 @@ function extractStreamText(chunk: string, fmt: ApiFormat): { text?: string; thin
         }
         if (obj.type === 'message_start' && obj.message?.usage) {
           const u = obj.message.usage
-          usage = { prompt: u.input_tokens, completion: u.output_tokens, total: (u.input_tokens ?? 0) + (u.output_tokens ?? 0) }
+          const p = typeof u.input_tokens === 'number' ? u.input_tokens : undefined
+          const c = typeof u.output_tokens === 'number' ? u.output_tokens : undefined
+          const tot = (p != null || c != null) ? ((p ?? 0) + (c ?? 0)) : undefined
+          usage = mergeUsage(usage, { prompt: p, completion: c, total: tot })
+        } else if (obj.type === 'message_delta' && obj.usage) {
+          const u = obj.usage
+          const p = typeof u.input_tokens === 'number' ? u.input_tokens : undefined
+          const c = typeof u.output_tokens === 'number' ? u.output_tokens : undefined
+          const tot = typeof u.total_tokens === 'number' ? u.total_tokens : undefined
+          usage = mergeUsage(usage, { prompt: p, completion: c, total: tot })
         }
       } else if (fmt === 'openai-responses') {
         if (obj.type === 'response.output_text.delta' && obj.delta) text += obj.delta
         if (obj.type === 'response.completed' && obj.response?.usage) {
           const u = obj.response.usage
-          usage = { prompt: u.input_tokens, completion: u.output_tokens, total: u.total_tokens }
+          usage = mergeUsage(usage, { prompt: u.input_tokens, completion: u.output_tokens, total: u.total_tokens })
         }
       }
     } catch { /* skip malformed */ }
@@ -328,7 +350,7 @@ export default function TestPage() {
         const decoder = new TextDecoder()
         let accThinking = ''
         let accText = ''
-        let lastUsage: ReturnType<typeof parseUsage> = null
+        let lastUsage: UsageInfo | null = null
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
@@ -337,7 +359,9 @@ export default function TestPage() {
           if (thk) { accThinking += thk }
           if (text) { accText += text }
           setBlocks(blocksFrom(accThinking, accText))
-          if (u) lastUsage = u
+          if (u) {
+            lastUsage = mergeUsage(lastUsage, u) ?? null
+          }
         }
         if (lastUsage) setUsage(lastUsage)
       } else {

@@ -16,7 +16,7 @@ import (
 
 func goRuntime() string { return runtime.Version() }
 
-const version = "0.2.0"
+var version = "0.6.1"
 
 func stateOf(c *gin.Context) *gateway.State {
 	v, _ := c.Get("state")

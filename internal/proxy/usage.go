@@ -68,7 +68,9 @@ func extractUsage(body []byte, apiFormat string) map[string]any {
 		inp, _ := toInt(u["input_tokens"])
 		out, _ := toInt(u["output_tokens"])
 		var total any
-		if inp != nil && out != nil {
+		if tot, ok := toInt(u["total_tokens"]); ok && *tot > 0 {
+			total = tot
+		} else if inp != nil && out != nil {
 			t := *inp + *out
 			total = t
 		}
@@ -97,6 +99,15 @@ func extractUsage(body []byte, apiFormat string) map[string]any {
 // toInt converts a JSON-ish number to *int, nil if absent/non-numeric.
 func toInt(v any) (*int, bool) {
 	switch t := v.(type) {
+	case *int:
+		if t != nil {
+			return t, true
+		}
+	case *int64:
+		if t != nil {
+			x := int(*t)
+			return &x, true
+		}
 	case float64:
 		x := int(t)
 		return &x, true
@@ -195,13 +206,36 @@ func sniffUsageChunk(chunk []byte, apiFormat string, holder *usageHolder) {
 			} else if event["type"] == "message_delta" {
 				u, _ := event["usage"].(map[string]any)
 				if u != nil {
+					if v, ok := toInt(u["input_tokens"]); ok {
+						if cur, ok := toInt(holder.usage["prompt_tokens"]); !ok || *cur == 0 || *v > 0 {
+							holder.usage["prompt_tokens"] = v
+						}
+					}
+					if v, ok := toInt(u["cache_read_input_tokens"]); ok {
+						if cur, ok := toInt(holder.usage["cache_read_tokens"]); !ok || *cur == 0 || *v > 0 {
+							holder.usage["cache_read_tokens"] = v
+						}
+					}
+					if v, ok := toInt(u["cache_creation_input_tokens"]); ok {
+						if cur, ok := toInt(holder.usage["cache_write_tokens"]); !ok || *cur == 0 || *v > 0 {
+							holder.usage["cache_write_tokens"] = v
+						}
+					}
 					if v, ok := toInt(u["output_tokens"]); ok {
 						holder.usage["completion_tokens"] = v
-						if inp, ok := toInt(holder.usage["prompt_tokens"]); ok {
-							t := *inp + *v
+					}
+					if tot, ok := toInt(u["total_tokens"]); ok && *tot > 0 {
+						holder.usage["total_tokens"] = tot
+					} else {
+						inp, inpOk := toInt(holder.usage["prompt_tokens"])
+						out, outOk := toInt(holder.usage["completion_tokens"])
+						if inpOk && outOk {
+							t := *inp + *out
 							holder.usage["total_tokens"] = t
-						} else {
-							holder.usage["total_tokens"] = v
+						} else if outOk {
+							holder.usage["total_tokens"] = out
+						} else if inpOk {
+							holder.usage["total_tokens"] = inp
 						}
 					}
 				}
