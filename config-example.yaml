@@ -10,6 +10,8 @@ providers:
         base_url: "https://token.sensenova.cn/v1"
       - api_format: openai-images   # → POST {base_url}/images/generations
         base_url: "https://token.sensenova.cn/v1"
+      - api_format: openai-embeddings # → POST {base_url}/embeddings
+        base_url: "https://token.sensenova.cn/v1"
     max_retries: 3
     key_strategy: "fill-first"      # fill-first | round-robin
     keys:
@@ -118,6 +120,16 @@ combos:
         members:
           - provider: sensenova
             model: "sensenova-u1-fast"
+
+      # -------------------------------------------------------------------
+      # 向量嵌入 combo
+      # -------------------------------------------------------------------
+      - name: "embedding"
+        api_format: openai-embeddings
+        strategy: "fill-first"
+        members:
+          - provider: sensenova
+            model: "text-embedding-3-small"
 
   # =======================================================================
   # 自定义命名空间分组（如 team-a）

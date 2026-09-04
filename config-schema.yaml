@@ -48,11 +48,12 @@ ProviderConfig:
 # 一个 (api_format, base_url) 对，决定上游请求转发到哪个路径。
 
 ApiEndpoint:
-  api_format:  <openai | anthropic | openai-responses | openai-images | gemini>
+  api_format:  <openai | anthropic | openai-responses | openai-images | openai-embeddings | gemini>
                # openai           → POST {base_url}/chat/completions
                # anthropic        → POST {base_url}/messages
                # openai-responses → POST {base_url}/responses
                # openai-images    → POST {base_url}/images/generations
+               # openai-embeddings→ POST {base_url}/embeddings
                # gemini           → POST {base_url}/models  （上游专用，不对客户端开放路由）
   base_url:    <string>   # 上游 base URL，末尾 / 会被自动去掉
 
@@ -111,11 +112,12 @@ ComboConfig:
   name:        <string>                    # 组内唯一标识符
   owned_by:    [string, default="default"] # 所属分组 ID（在平铺配置模式下使用）
   api_format:  <format | list[format]>     # 单值或列表，决定此 combo 接受哪些客户端格式
-                                           # 可选值：openai | anthropic | openai-responses | openai-images
+                                           # 可选值：openai | anthropic | openai-responses | openai-images | openai-embeddings
                                            # openai           → /v1/chat/completions
                                            # anthropic        → /v1/messages
                                            # openai-responses → /v1/responses
                                            # openai-images    → /v1/images/generations
+                                           # openai-embeddings→ /v1/embeddings
   strategy:    [fill-first | round-robin, default=fill-first]
                                            # fill-first：优先第一个 member，耗尽才切换
                                            # round-robin：每次请求轮询 member
@@ -210,6 +212,7 @@ PayloadScript:
 #   POST /v1/messages          ←→  anthropic
 #   POST /v1/responses         ←→  openai-responses
 #   POST /v1/images/generations←→  openai-images
+#   POST /v1/embeddings        ←→  openai-embeddings
 #
 # GET  /v1/models                  可用模型列表（OpenAI 兼容格式）
 # GET  /health                     健康检查

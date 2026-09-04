@@ -6,9 +6,9 @@ import type {
 } from '../api/client'
 
 // Client-facing formats (proxy routes exist for these).
-const CLIENT_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'openai-images']
+const CLIENT_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'openai-images', 'openai-embeddings']
 // All formats including upstream-only (for upstream_api_format hint).
-const ALL_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'openai-images', 'gemini']
+const ALL_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'openai-images', 'openai-embeddings', 'gemini']
 
 const EMPTY_ENDPOINT = (): ApiEndpoint => ({ api_format: 'openai', base_url: '' })
 const EMPTY_RULE = (): HealthCheckRule => ({

@@ -138,6 +138,37 @@ func TestComboSingleAPIFormatAsString(t *testing.T) {
 	}
 }
 
+func TestProviderEmbeddingsFormat(t *testing.T) {
+	const embYAML = `
+providers:
+  - name: sn-emb
+    api:
+      - api_format: openai-embeddings
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-emb
+    health_check_rules: []
+combos:
+  - name: emb-combo
+    api_format: openai-embeddings
+    members:
+      - provider: sn-emb
+        model: text-embedding-3-small
+`
+	cfg := loadFromText(t, embYAML)
+	p := &cfg.Providers[0]
+	if !p.SupportsFormat("openai-embeddings") {
+		t.Fatal("expected openai-embeddings support")
+	}
+	if got := p.GetChatURL("openai-embeddings"); got != "https://upstream.test/v1/embeddings" {
+		t.Fatalf("unexpected embeddings url: %s", got)
+	}
+	c := &cfg.Combos[0]
+	if got := c.APIFormats(); len(got) != 1 || got[0] != "openai-embeddings" {
+		t.Fatalf("unexpected combo formats: %v", got)
+	}
+}
+
 func mustReject(t *testing.T, text string) {
 	t.Helper()
 	dir := t.TempDir()

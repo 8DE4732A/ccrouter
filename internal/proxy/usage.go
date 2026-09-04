@@ -87,10 +87,23 @@ func extractUsage(body []byte, apiFormat string) map[string]any {
 	if details != nil {
 		cached = keep(details["cached_tokens"])
 	}
+	prompt := keep(u["prompt_tokens"])
+	completion := keep(u["completion_tokens"])
+	total := keep(u["total_tokens"])
+	if total == nil && prompt != nil {
+		if completion != nil {
+			p, _ := toInt(prompt)
+			c, _ := toInt(completion)
+			t := *p + *c
+			total = &t
+		} else {
+			total = prompt
+		}
+	}
 	return map[string]any{
-		"prompt_tokens":      keep(u["prompt_tokens"]),
-		"completion_tokens":  keep(u["completion_tokens"]),
-		"total_tokens":       keep(u["total_tokens"]),
+		"prompt_tokens":      prompt,
+		"completion_tokens":  completion,
+		"total_tokens":       total,
 		"cache_read_tokens":  cached,
 		"cache_write_tokens": nil,
 	}

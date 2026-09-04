@@ -143,4 +143,18 @@ func TestExtractUsage_ExistingFormats(t *testing.T) {
 	if !reflect.DeepEqual(gu["prompt_tokens"], intVal(15)) || !reflect.DeepEqual(gu["completion_tokens"], intVal(25)) || !reflect.DeepEqual(gu["total_tokens"], intVal(40)) {
 		t.Errorf("gemini usage mismatch: %v", gu)
 	}
+
+	// OpenAI Embeddings (no completion_tokens)
+	embBody := []byte(`{"object":"list","data":[{"object":"embedding","index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":8,"total_tokens":8}}`)
+	eu := extractUsage(embBody, "openai-embeddings")
+	if !reflect.DeepEqual(eu["prompt_tokens"], intVal(8)) || eu["completion_tokens"] != nil || !reflect.DeepEqual(eu["total_tokens"], intVal(8)) {
+		t.Errorf("openai-embeddings usage mismatch: %v", eu)
+	}
+
+	// OpenAI Embeddings with missing total_tokens
+	embBodyMissingTotal := []byte(`{"object":"list","data":[],"usage":{"prompt_tokens":12}}`)
+	eum := extractUsage(embBodyMissingTotal, "openai-embeddings")
+	if !reflect.DeepEqual(eum["prompt_tokens"], intVal(12)) || eum["completion_tokens"] != nil || !reflect.DeepEqual(eum["total_tokens"], intVal(12)) {
+		t.Errorf("openai-embeddings fallback total_tokens mismatch: %v", eum)
+	}
 }

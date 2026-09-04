@@ -44,20 +44,22 @@ const RequestTimeoutDisabled = -1
 
 // validClientFormats are formats the proxy exposes to clients (server routes exist for each).
 var validClientFormats = map[string]bool{
-	"openai":           true,
-	"anthropic":        true,
-	"openai-responses": true,
-	"openai-images":    true,
+	"openai":            true,
+	"anthropic":         true,
+	"openai-responses":  true,
+	"openai-images":     true,
+	"openai-embeddings": true,
 }
 
 // validAPIFormats includes all formats valid for upstream endpoints and upstream_api_format hints.
 // Gemini is upstream-only: no client-facing route is registered for it.
 var validAPIFormats = map[string]bool{
-	"openai":           true,
-	"anthropic":        true,
-	"openai-responses": true,
-	"openai-images":    true,
-	"gemini":           true,
+	"openai":            true,
+	"anthropic":         true,
+	"openai-responses":  true,
+	"openai-images":     true,
+	"openai-embeddings": true,
+	"gemini":            true,
 }
 
 var validKeyStrategies = map[string]bool{
@@ -113,6 +115,8 @@ func (e *ApiEndpoint) ChatURL() string {
 		return base + "/responses"
 	case "openai-images":
 		return base + "/images/generations"
+	case "openai-embeddings":
+		return base + "/embeddings"
 	case "gemini":
 		return base + "/models"
 	default:

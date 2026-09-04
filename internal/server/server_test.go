@@ -395,3 +395,27 @@ combos:
 	}
 }
 
+func TestEmbeddingsRoute(t *testing.T) {
+	st, _ := newTestStateWithYAML(t, testConfigYAMLWithAPIKeys)
+	r := Router(st)
+
+	// Unauthorized request -> 401
+	rec := doJSON(t, r, "POST", "/v1/embeddings", map[string]any{
+		"model": "text-embedding-3-small",
+		"input": "test input",
+	})
+	if rec.Code != 401 {
+		t.Fatalf("expected 401 unauthorized for /v1/embeddings without key, got %d", rec.Code)
+	}
+
+	// Authorized request with key -> reaches proxy (returns 400 since combo not in this test YAML)
+	req := httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(`{"model":"unknown-model","input":"test"}`))
+	req.Header.Set("Authorization", "Bearer correct-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 unknown combo for authorized request, got %d", rec.Code)
+	}
+}
+

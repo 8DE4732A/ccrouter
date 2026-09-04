@@ -36,6 +36,9 @@ function buildBody(
       ...(thinking !== 'off' ? { reasoning: { effort: thinking } } : {}),
     }
   }
+  if (fmt === 'openai-embeddings') {
+    return { model, input: prompt }
+  }
   if (fmt === 'openai-images') {
     return { model, prompt, n: 1, size: imageSize || '1024x1024' }
   }
@@ -186,6 +189,15 @@ function parseNonStreamBlocks(fmt: ApiFormat, obj: unknown, rawText: string): Ou
       }
     }
     return blocks.length > 0 ? blocks : [{ type: 'text', content: rawText }]
+  }
+  if (fmt === 'openai-embeddings') {
+    const data = o.data as { object?: string; index?: number; embedding?: number[] }[] | undefined
+    if (Array.isArray(data) && data.length > 0) {
+      const dim = data[0]?.embedding?.length ?? 0
+      const prefix = `[Embeddings] 模型: ${o.model ?? '—'} | 向量维度: ${dim} | 结果数: ${data.length}\n\n`
+      return [{ type: 'text', content: prefix + JSON.stringify(obj, null, 2) }]
+    }
+    return [{ type: 'text', content: rawText }]
   }
   return [{ type: 'text', content: rawText }]
 }
@@ -496,7 +508,7 @@ export default function TestPage() {
                         style={{ fontSize: 12, padding: '4px 10px', ...(fmt !== f ? {} : {}) }}
                         onClick={() => {
                           setFmt(f)
-                          if (f === 'openai-images') setStream(false)
+                          if (f === 'openai-images' || f === 'openai-embeddings') setStream(false)
                         }}
                         disabled={state === 'streaming' || state === 'sending'}
                       >
@@ -513,11 +525,11 @@ export default function TestPage() {
                       type="checkbox"
                       checked={stream}
                       onChange={e => setStream(e.target.checked)}
-                      disabled={fmt === 'openai-images' || state === 'streaming' || state === 'sending'}
+                      disabled={fmt === 'openai-images' || fmt === 'openai-embeddings' || state === 'streaming' || state === 'sending'}
                     />
                     <span className="field-label">流式响应（SSE）</span>
-                    {fmt === 'openai-images' && (
-                      <span className="dim">— 图像 API 不支持流式</span>
+                    {(fmt === 'openai-images' || fmt === 'openai-embeddings') && (
+                      <span className="dim">— {fmt === 'openai-images' ? '图像 API' : '向量 API'} 不支持流式</span>
                     )}
                   </label>
                 </div>
@@ -609,12 +621,16 @@ export default function TestPage() {
           <div className="card">
             <div className="card-body-simple">
               <div className="field-label" style={{ marginBottom: 6 }}>
-                {fmt === 'openai-images' ? '图像描述（prompt）' : '提示词'}
+                {fmt === 'openai-images' ? '图像描述（prompt）' : fmt === 'openai-embeddings' ? '待向量化文本（input）' : '提示词'}
               </div>
               <textarea
                 value={prompt}
                 onChange={e => setPrompt(e.target.value)}
-                placeholder={fmt === 'openai-images' ? '描述你想生成的图像，例如：a cute cat sitting on a cloud' : '输入测试消息，例如：你好，简单介绍一下自己'}
+                placeholder={
+                  fmt === 'openai-images' ? '描述你想生成的图像，例如：a cute cat sitting on a cloud' :
+                  fmt === 'openai-embeddings' ? '输入需要向量化的文本，例如：The quick brown fox jumps over the lazy dog' :
+                  '输入测试消息，例如：你好，简单介绍一下自己'
+                }
                 disabled={state === 'streaming' || state === 'sending'}
                 style={{
                   width: '100%',

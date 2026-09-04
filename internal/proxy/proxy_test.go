@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"ccrouter/internal/combos"
 	"ccrouter/internal/config"
+	"ccrouter/internal/db"
 	"ccrouter/internal/keys"
 )
 
@@ -612,4 +614,86 @@ func TestProxyOwnedByRouting(t *testing.T) {
 		t.Fatalf("expected 400 for unknown combo, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }
+
+func TestEmbeddingsProxy(t *testing.T) {
+	var receivedPath string
+	var receivedAuth string
+	var receivedBody map[string]any
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		_ = json.NewDecoder(r.Body).Decode(&receivedBody)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"object": "list",
+			"data": [
+				{"object": "embedding", "index": 0, "embedding": [0.01, 0.02, 0.03]}
+			],
+			"model": "text-embedding-3-small",
+			"usage": {
+				"prompt_tokens": 5,
+				"total_tokens": 5
+			}
+		}`))
+	}))
+	defer upstream.Close()
+
+	cfg := &config.AppConfig{
+		Providers: []config.ProviderConfig{
+			{
+				Name:        "sn-emb",
+				APIs:        []config.ApiEndpoint{{APIFormat: "openai-embeddings", BaseURL: upstream.URL}},
+				MaxRetries:  1,
+				KeyStrategy: "fill-first",
+				Keys:        []config.KeyConfig{{Key: "sk-emb-key"}},
+			},
+		},
+		Combos: []config.ComboConfig{
+			{
+				Name:      "emb-combo",
+				APIFormat: "openai-embeddings",
+				Strategy:  "fill-first",
+				Members: []config.ComboMember{
+					{Provider: "sn-emb", Model: "text-embedding-3-small"},
+				},
+			},
+		},
+	}
+
+	kms := map[string]*keys.Manager{
+		"sn-emb": keys.NewManager("sn-emb", []string{"sk-emb-key"}, "fill-first"),
+	}
+	recRecorder, _ := db.NewRecorder(filepath.Join(t.TempDir(), "test.db"))
+	svc, err := New(cfg, kms, combos.NewRouter(cfg.Combos), map[string]*http.Client{}, recRecorder, nil)
+	if err != nil {
+		t.Fatalf("New service: %v", err)
+	}
+
+	reqBody := `{"model":"emb-combo","input":"test embedding"}`
+	req := httptest.NewRequest("POST", "/v1/embeddings", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer client-key")
+	w := httptest.NewRecorder()
+
+	svc.Handle(w, req, "openai-embeddings", true)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if receivedPath != "/embeddings" {
+		t.Fatalf("expected upstream path /embeddings, got %q", receivedPath)
+	}
+	if receivedAuth != "Bearer sk-emb-key" {
+		t.Fatalf("expected upstream auth Bearer sk-emb-key, got %q", receivedAuth)
+	}
+	if receivedBody["model"] != "text-embedding-3-small" {
+		t.Fatalf("expected model to be rewritten to text-embedding-3-small, got %v", receivedBody["model"])
+	}
+	if !strings.Contains(w.Body.String(), "0.01, 0.02, 0.03") {
+		t.Fatalf("unexpected response body: %s", w.Body.String())
+	}
+}
+
 

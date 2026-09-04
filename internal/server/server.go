@@ -48,6 +48,9 @@ func Router(state *gateway.State) *gin.Engine {
 		proxyGroup.POST("/v1/images/generations", func(c *gin.Context) {
 			state.Service().Handle(c.Writer, c.Request, "openai-images", true)
 		})
+		proxyGroup.POST("/v1/embeddings", func(c *gin.Context) {
+			state.Service().Handle(c.Writer, c.Request, "openai-embeddings", true)
+		})
 		proxyGroup.GET("/v1/models", func(c *gin.Context) {
 			listModels(c, state)
 		})

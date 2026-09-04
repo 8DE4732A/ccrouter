@@ -118,7 +118,7 @@ payload_scripts:        # 可选；转发前按顺序执行的改写脚本
 providers:
   - name: sensenova               # 唯一标识符，供 combo 引用
     api:
-      - api_format: openai        # openai | anthropic | openai-responses | openai-images
+      - api_format: openai        # openai | anthropic | openai-responses | openai-images | openai-embeddings
         base_url: "https://token.sensenova.cn/v1"
       - api_format: anthropic     # 同一组 key 可同时支持多种格式
         base_url: "https://token.sensenova.cn/v1"
@@ -247,6 +247,7 @@ payload_scripts:
 | `POST /v1/messages` | Anthropic Messages（格式：`anthropic`） |
 | `POST /v1/responses` | OpenAI Responses API（格式：`openai-responses`） |
 | `POST /v1/images/generations` | OpenAI Images（格式：`openai-images`） |
+| `POST /v1/embeddings` | OpenAI Embeddings（格式：`openai-embeddings`） |
 | `GET /v1/models` | 返回所有可用 combo（含 alias），OpenAI 兼容格式 |
 | `GET /health` | 健康检查 |
 | `GET /keys/status` | 实时密钥池状态 |
