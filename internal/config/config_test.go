@@ -626,3 +626,45 @@ combos:
 `)
 }
 
+func TestAdminPasswordConfig(t *testing.T) {
+	text := `
+general:
+  admin_password: "super-secret-password"
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: my-combo
+    api_format: openai
+    strategy: fill-first
+    members:
+      - provider: sn
+        model: gpt-4o
+`
+	cfg := loadFromText(t, text)
+	if cfg.General.AdminPassword != "super-secret-password" {
+		t.Fatalf("expected admin_password to be 'super-secret-password', got %q", cfg.General.AdminPassword)
+	}
+
+	dumped := Dump(cfg)
+	gen, ok := dumped["general"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected general map in dumped config, got %#v", dumped["general"])
+	}
+	if gen["admin_password"] != "super-secret-password" {
+		t.Fatalf("expected dumped admin_password to be 'super-secret-password', got %#v", gen["admin_password"])
+	}
+
+	// Empty password should not be present in Dump
+	cfg.General.AdminPassword = ""
+	dumpedEmpty := Dump(cfg)
+	if genEmpty, ok := dumpedEmpty["general"].(map[string]any); ok {
+		if _, exists := genEmpty["admin_password"]; exists {
+			t.Fatalf("expected empty admin_password to not be in dump")
+		}
+	}
+}

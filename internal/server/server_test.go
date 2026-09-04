@@ -419,3 +419,195 @@ func TestEmbeddingsRoute(t *testing.T) {
 	}
 }
 
+func TestAdminAuthentication(t *testing.T) {
+	// 1. Unauthenticated mode (admin_password not set)
+	stNoAuth, _ := newTestState(t)
+	rNoAuth := Router(stNoAuth)
+
+	// Status endpoint
+	rec := doGET(t, rNoAuth, "/admin/api/auth/status")
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var statusResp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusResp); err != nil {
+		t.Fatal(err)
+	}
+	if statusResp["auth_required"] != false || statusResp["logged_in"] != true {
+		t.Fatalf("expected auth_required=false and logged_in=true, got %#v", statusResp)
+	}
+
+	// Direct access to /admin/api/config should succeed
+	rec = doGET(t, rNoAuth, "/admin/api/config")
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 without auth, got %d", rec.Code)
+	}
+
+	// 2. Authenticated mode (admin_password set)
+	const testConfigYAMLWithAdminPassword = `
+general:
+  admin_password: "super-admin-pass"
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "http://127.0.0.1:1/v1"
+    keys:
+      - key: sk-1
+    health_check_rules: []
+combos:
+  - name: fast
+    api_format: openai
+    strategy: fill-first
+    members:
+      - provider: sn
+        model: gpt
+verbose_logging: false
+payload_scripts: []
+`
+	stAuth, _ := newTestStateWithYAML(t, testConfigYAMLWithAdminPassword)
+	rAuth := Router(stAuth)
+
+	// Status endpoint without credentials
+	rec = doGET(t, rAuth, "/admin/api/auth/status")
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusResp); err != nil {
+		t.Fatal(err)
+	}
+	if statusResp["auth_required"] != true || statusResp["logged_in"] != false {
+		t.Fatalf("expected auth_required=true and logged_in=false, got %#v", statusResp)
+	}
+
+	// Protected endpoint without credentials should fail with 401
+	rec = doGET(t, rAuth, "/admin/api/config")
+	if rec.Code != 401 {
+		t.Fatalf("expected 401 for unauthenticated request, got %d", rec.Code)
+	}
+
+	// Login with wrong password
+	rec = doJSON(t, rAuth, "POST", "/admin/api/auth/login", map[string]any{"password": "wrong-password"})
+	if rec.Code != 401 {
+		t.Fatalf("expected 401 for wrong password, got %d", rec.Code)
+	}
+
+	// Login with correct password
+	rec = doJSON(t, rAuth, "POST", "/admin/api/auth/login", map[string]any{"password": "super-admin-pass"})
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 for correct login, got %d", rec.Code)
+	}
+	var loginResp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &loginResp); err != nil {
+		t.Fatal(err)
+	}
+	token, ok := loginResp["token"].(string)
+	if !ok || token == "" {
+		t.Fatalf("expected non-empty token string, got %#v", loginResp["token"])
+	}
+
+	// Status endpoint with valid session token
+	req := httptest.NewRequest("GET", "/admin/api/auth/status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	rAuth.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &statusResp); err != nil {
+		t.Fatal(err)
+	}
+	if statusResp["auth_required"] != true || statusResp["logged_in"] != true {
+		t.Fatalf("expected auth_required=true and logged_in=true, got %#v", statusResp)
+	}
+
+	// Protected endpoint with valid session token via Authorization: Bearer <token>
+	req = httptest.NewRequest("GET", "/admin/api/config", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec = httptest.NewRecorder()
+	rAuth.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 with session token, got %d", rec.Code)
+	}
+
+	// Protected endpoint with valid session token via X-Admin-Token
+	req = httptest.NewRequest("GET", "/admin/api/config", nil)
+	req.Header.Set("X-Admin-Token", token)
+	rec = httptest.NewRecorder()
+	rAuth.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 with X-Admin-Token, got %d", rec.Code)
+	}
+
+	// Protected endpoint with direct password in Authorization: Bearer <admin_password>
+	req = httptest.NewRequest("GET", "/admin/api/config", nil)
+	req.Header.Set("Authorization", "Bearer super-admin-pass")
+	rec = httptest.NewRecorder()
+	rAuth.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 with direct password Bearer, got %d", rec.Code)
+	}
+
+	// Protected endpoint with tampered token
+	req = httptest.NewRequest("GET", "/admin/api/config", nil)
+	req.Header.Set("Authorization", "Bearer "+token+"tampered")
+	rec = httptest.NewRecorder()
+	rAuth.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("expected 401 for tampered token, got %d", rec.Code)
+	}
+
+	// Logout endpoint
+	rec = doJSON(t, rAuth, "POST", "/admin/api/auth/logout", nil)
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 for logout, got %d", rec.Code)
+	}
+
+	// 3. Test rate limiting and lockout
+	resetLoginLimiter()
+	// Fail 4 times -> returns 401
+	for i := 1; i <= 4; i++ {
+		req := httptest.NewRequest("POST", "/admin/api/auth/login", strings.NewReader(`{"password":"bad"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "192.0.2.10:54321"
+		rec := httptest.NewRecorder()
+		rAuth.ServeHTTP(rec, req)
+		if rec.Code != 401 {
+			t.Fatalf("expected 401 on attempt %d, got %d", i, rec.Code)
+		}
+	}
+	// 5th failure -> triggers lockout and returns 401
+	{
+		req := httptest.NewRequest("POST", "/admin/api/auth/login", strings.NewReader(`{"password":"bad"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "192.0.2.10:54321"
+		rec := httptest.NewRecorder()
+		rAuth.ServeHTTP(rec, req)
+		if rec.Code != 401 {
+			t.Fatalf("expected 401 on 5th attempt, got %d", rec.Code)
+		}
+	}
+	// 6th attempt (even with correct password) -> 429 Too Many Requests
+	{
+		req := httptest.NewRequest("POST", "/admin/api/auth/login", strings.NewReader(`{"password":"super-admin-pass"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "192.0.2.10:54321"
+		rec := httptest.NewRecorder()
+		rAuth.ServeHTTP(rec, req)
+		if rec.Code != 429 {
+			t.Fatalf("expected 429 on 6th attempt due to lockout, got %d", rec.Code)
+		}
+	}
+	// Different IP should not be locked out and can log in successfully
+	{
+		req := httptest.NewRequest("POST", "/admin/api/auth/login", strings.NewReader(`{"password":"super-admin-pass"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "192.0.2.20:54321"
+		rec := httptest.NewRecorder()
+		rAuth.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("expected 200 from different IP, got %d", rec.Code)
+		}
+	}
+}
+

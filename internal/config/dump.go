@@ -34,6 +34,9 @@ func Dump(cfg *AppConfig) map[string]any {
 	} else if cfg.General.RequestTimeoutSeconds > 0 {
 		general["request_timeout_seconds"] = cfg.General.RequestTimeoutSeconds
 	}
+	if cfg.General.AdminPassword != "" {
+		general["admin_password"] = cfg.General.AdminPassword
+	}
 
 	providers := make([]any, 0, len(cfg.Providers))
 	for _, p := range cfg.Providers {

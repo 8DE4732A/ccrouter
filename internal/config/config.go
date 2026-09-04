@@ -36,6 +36,10 @@ type GeneralConfig struct {
 	// representation of an explicit `request_timeout_seconds: 0` in the YAML/JSON config,
 	// distinguishing "user explicitly disabled the timeout" from "field omitted".
 	RequestTimeoutSeconds int `json:"request_timeout_seconds,omitempty" yaml:"request_timeout_seconds,omitempty"`
+
+	// AdminPassword is the single-user password required to access the admin console
+	// and management APIs (/admin/api/*). If empty, no authentication is required.
+	AdminPassword string `json:"admin_password,omitempty" yaml:"admin_password,omitempty"`
 }
 
 // RequestTimeoutDisabled is the sentinel value for GeneralConfig.RequestTimeoutSeconds

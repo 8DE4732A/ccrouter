@@ -1,13 +1,39 @@
 /** Thin fetch wrapper with baseURL /admin/api */
 
 const BASE = '/admin/api'
+const TOKEN_KEY = 'ccrouter_admin_token'
+
+export function getAdminToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY)
+}
+
+export function setAdminToken(token: string) {
+  localStorage.setItem(TOKEN_KEY, token)
+}
+
+export function clearAdminToken() {
+  localStorage.removeItem(TOKEN_KEY)
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const token = getAdminToken()
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...((init?.headers as Record<string, string>) || {}),
+  }
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`
+  }
+
   const resp = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...init?.headers },
     ...init,
+    headers,
   })
   if (!resp.ok) {
+    if (resp.status === 401) {
+      clearAdminToken()
+      window.dispatchEvent(new CustomEvent('ccrouter:unauthorized'))
+    }
     const err = await resp.json().catch(() => ({ error: resp.statusText }))
     throw new Error(err.error ?? resp.statusText)
   }
@@ -29,6 +55,7 @@ export type GeneralConfig = {
   api_keys?: APIKeyEntry[]
   proxy?: ProxyConfig
   request_timeout_seconds?: number  // upstream request timeout in seconds, default 600 (10min)
+  admin_password?: string
 }
 
 export type HealthCheckRule = {
@@ -304,3 +331,36 @@ export const getLogDetail = (ts: number) => request<LogRecord>(`/logs/detail/${t
 export const getLogSettings = () => request<LogSettings>('/logs/settings')
 export const putLogSettings = (enabled: boolean) =>
   request<LogSettings>('/logs/settings', { method: 'PUT', body: JSON.stringify({ enabled }) })
+
+// ---- Auth ----
+export type AuthStatus = {
+  auth_required: boolean
+  logged_in: boolean
+}
+
+export type LoginResponse = {
+  token: string
+  expires_at: number
+}
+
+export const fetchAuthStatus = () => request<AuthStatus>('/auth/status')
+
+export const loginAdmin = async (password: string) => {
+  const res = await request<LoginResponse>('/auth/login', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  })
+  if (res.token) {
+    setAdminToken(res.token)
+  }
+  return res
+}
+
+export const logoutAdmin = async () => {
+  try {
+    await request<{ status: string }>('/auth/logout', { method: 'POST' })
+  } finally {
+    clearAdminToken()
+    window.dispatchEvent(new CustomEvent('ccrouter:unauthorized'))
+  }
+}

@@ -614,6 +614,7 @@ function GeneralPanel({
   onUpdate: (patch: Partial<GeneralConfig>) => void
 }) {
   const [revealedKeys, setRevealedKeys] = useState<Set<number>>(new Set())
+  const [revealAdminPw, setRevealAdminPw] = useState(false)
   const toggleReveal = (ki: number) =>
     setRevealedKeys(prev => {
       const next = new Set(prev)
@@ -631,6 +632,51 @@ function GeneralPanel({
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 32, maxWidth: 720 }}>
+
+      {/* Admin Password */}
+      <div>
+        <SectionLabel>管理页面认证密码</SectionLabel>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+          设置后，访问 Web 管理控制台及调用管理 API（/admin/api/*）必须进行密码认证。留空表示不启用认证（完全公开）。
+        </div>
+        <FieldRow label="管理员密码" hint="留空 = 不启用管理认证">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, maxWidth: 360, width: '100%' }}>
+            <input
+              type={revealAdminPw ? 'text' : 'password'}
+              value={general.admin_password ?? ''}
+              placeholder="留空表示无需登录认证"
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12, flex: 1 }}
+              onChange={e => {
+                const val = e.target.value
+                onUpdate({ admin_password: val || undefined })
+              }}
+            />
+            <button
+              className="btn-icon"
+              title={revealAdminPw ? '隐藏' : '显示'}
+              onClick={() => setRevealAdminPw(prev => !prev)}
+              style={{ color: revealAdminPw ? 'var(--accent)' : 'var(--text-3)' }}
+            >
+              <IconEye off={revealAdminPw} />
+            </button>
+            {general.admin_password && (
+              <button
+                className="btn-icon"
+                title="清除密码"
+                onClick={() => onUpdate({ admin_password: undefined })}
+                style={{ color: 'var(--text-3)' }}
+              >
+                <IconTrash />
+              </button>
+            )}
+          </div>
+        </FieldRow>
+        {general.admin_password && (
+          <div style={{ marginTop: 4, fontSize: 12, color: 'var(--ok-fg)' }}>
+            ✓ 已启用管理页面密码认证
+          </div>
+        )}
+      </div>
 
       {/* API Keys */}
       <div>
@@ -902,6 +948,9 @@ export default function ConfigEditor() {
       }
       if ((cleanGeneral.api_keys ?? []).length === 0) {
         delete cleanGeneral.api_keys
+      }
+      if (!cleanGeneral.admin_password || cleanGeneral.admin_password.trim() === '') {
+        delete cleanGeneral.admin_password
       }
 
       await putConfig({

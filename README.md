@@ -10,10 +10,10 @@
 - **Combo 路由** — 将一个虚拟模型名映射到多个 `(provider, model)` 成员，按策略依次尝试
 - **两级重试** — 先在当前 Provider 内轮换密钥，密钥全部冷却后自动切换到 Combo 的下一个成员
 - **细粒度冷却** — 冷却粒度为 `(key, model)`，同一个 key 下不同模型的配额相互独立
-- **多格式支持** — 同时支持 OpenAI Chat、Anthropic Messages、OpenAI Responses、OpenAI Images 四种 API 格式
+- **多格式支持** — 同时支持 OpenAI Chat、Anthropic Messages、OpenAI Responses、OpenAI Images、OpenAI Embeddings 五种 API 格式
 - **Payload 脚本** — 转发前执行脚本改写请求 body / header（基于 [expr-lang/expr](https://github.com/expr-lang/expr)，天然沙箱）
 - **Streaming** — 正确处理 SSE 流式响应，含 token usage 嗅探和首帧错误检测
-- **管理页面** — 内置 Web UI，支持实时统计、请求明细、热重载配置（`/admin/`）
+- **管理页面** — 内置 Web UI，支持单用户密码认证、实时统计、请求明细、热重载配置（`/admin/`）
 - **单二进制** — 前端静态资源通过 `go:embed` 内嵌，部署只需一个可执行文件
 
 ## 安装
@@ -62,7 +62,7 @@ vim config.yaml
 
 访问 `http://localhost:8000/admin/` 打开管理页面。
 
-> **注意**：管理页面无认证，默认绑定 `127.0.0.1`，请勿暴露到公网。
+> **安全说明**：管理页面支持单用户密码认证（在 `general.admin_password` 中设置）。若未配置或为空，则无需认证直接访问。若需对外网暴露，建议配置强密码。
 
 ## 命令行参数
 
@@ -102,6 +102,10 @@ providers:        # 上游 Provider 列表（至少一个）
 
 combos:           # 虚拟模型名到 Provider 的映射（至少一个）
   - ...
+
+general:          # 可选；全局设置
+  admin_password: "..."   # 管理控制台访问密码（留空则不开启认证）
+  request_timeout_seconds: 600 # 上游请求超时时间（秒）
 
 verbose_logging: false  # 可选；true 时在 cwd/logs/ 记录完整请求报文（含明文密钥）
 

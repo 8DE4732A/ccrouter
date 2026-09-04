@@ -283,6 +283,10 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 				cfg.General.RequestTimeoutSeconds = timeout
 			}
 		}
+		// admin_password
+		if ap, ok := gm["admin_password"]; ok {
+			cfg.General.AdminPassword = strings.TrimSpace(strVal(ap))
+		}
 	}
 
 	// ---- verbose_logging ----

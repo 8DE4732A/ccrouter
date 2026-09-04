@@ -17,6 +17,9 @@ providers:           # list，至少一个 ProviderConfig
 combos:              # list，至少一个 ComboGroup 或 ComboConfig
   - <ComboGroupConfig | ComboConfig>
 
+general:             [GeneralConfig, default={}]
+                     # 全局设置，包括客户端 API Key 认证、全局出站代理、请求超时以及管理控制台认证
+
 verbose_logging:     [bool, default=false]
                      # 是否将完整请求报文写入 cwd/logs/requests.jsonl
                      # 含请求 body、响应 body、headers（含密钥明文），仅限私有网络使用
@@ -205,6 +208,21 @@ PayloadScript:
 # 7. 成功响应：如有翻译则反向转换响应体，再透传给客户端（流式 SSE 逐帧转换）
 #
 # ===========================================================================
+# GeneralConfig
+# ===========================================================================
+# 全局设置
+
+GeneralConfig:
+  api_keys:                [list[APIKeyEntry], default=[]]
+                           # 客户端访问代理接口必须携带的 API 密钥列表；若为空则无需认证
+  proxy:                   [ProxyConfig, default=null]
+                           # 全局出站代理，所有 Provider 默认继承
+  request_timeout_seconds: [int, default=600]
+                           # 上游请求总超时时间（秒）；0 表示禁用超时（无限等待）
+  admin_password:          [string, default=""]
+                           # 管理控制台（Web UI 及 /admin/api/*）登录密码；若未配置或为空则无需认证
+
+# ===========================================================================
 # 端点 → api_format 对应表（客户端）
 # ===========================================================================
 #
@@ -218,6 +236,9 @@ PayloadScript:
 # GET  /health                     健康检查
 # GET  /keys/status                实时 key 池状态（含冷却信息）
 # GET  /admin/                     管理页面
+# GET  /admin/api/auth/status      管理认证状态查询
+# POST /admin/api/auth/login       管理员登录
+# POST /admin/api/auth/logout      管理员登出
 # GET  /admin/api/config           查看/编辑配置（热重载）
 # GET  /admin/api/stats/keys       key 状态统计
 # GET  /admin/api/stats/summary    聚合统计（按 combo/provider/model 分组）
@@ -227,3 +248,4 @@ PayloadScript:
 # GET  /admin/api/health           服务健康状态
 # GET  /admin/api/logs             详细请求报文（需开启 verbose_logging）
 # GET  /admin/api/logs/settings    查看/切换 verbose_logging
+

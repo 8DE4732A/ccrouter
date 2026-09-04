@@ -28,6 +28,10 @@ var distFS embed.FS
 // Router builds the Gin engine wired to the gateway state.
 func Router(state *gateway.State) *gin.Engine {
 	r := gin.New()
+	// Do not trust any proxies: ClientIP() falls back to RemoteAddr so that the
+	// login rate limiter cannot be bypassed with a spoofed X-Forwarded-For header
+	// when the server is exposed directly.
+	_ = r.SetTrustedProxies(nil)
 	r.Use(gin.Recovery())
 
 	// Auth middleware: if general.api_keys is set, require Bearer token.
@@ -63,18 +67,27 @@ func Router(state *gateway.State) *gin.Engine {
 	// ---- Admin API ----
 	admin := r.Group("/admin/api", func(c *gin.Context) { c.Set("state", state) })
 	{
-		admin.GET("/config", getConfig)
-		admin.PUT("/config", putConfig)
-		admin.GET("/stats/keys", statsKeys)
-		admin.GET("/stats/summary", statsSummary)
-		admin.GET("/stats/trend", statsTrend)
-		admin.GET("/requests", listRequests)
-		admin.GET("/info", adminInfo)
-		admin.GET("/health", adminHealth)
-		admin.GET("/logs", listLogs)
-		admin.GET("/logs/detail/:ts", getLogDetail)
-		admin.GET("/logs/settings", getLogSettings)
-		admin.PUT("/logs/settings", putLogSettings)
+		// Public auth endpoints
+		admin.GET("/auth/status", getAuthStatus)
+		admin.POST("/auth/login", adminLogin)
+		admin.POST("/auth/logout", adminLogout)
+
+		// Protected admin endpoints
+		protected := admin.Group("", adminAuth(state))
+		{
+			protected.GET("/config", getConfig)
+			protected.PUT("/config", putConfig)
+			protected.GET("/stats/keys", statsKeys)
+			protected.GET("/stats/summary", statsSummary)
+			protected.GET("/stats/trend", statsTrend)
+			protected.GET("/requests", listRequests)
+			protected.GET("/info", adminInfo)
+			protected.GET("/health", adminHealth)
+			protected.GET("/logs", listLogs)
+			protected.GET("/logs/detail/:ts", getLogDetail)
+			protected.GET("/logs/settings", getLogSettings)
+			protected.PUT("/logs/settings", putLogSettings)
+		}
 	}
 
 	// ---- Admin SPA (static) ----

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { NavLink, Route, Routes } from 'react-router-dom'
 import './App.css'
 import Overview from './pages/Overview'
@@ -7,6 +7,18 @@ import ConfigEditor from './pages/ConfigEditor'
 import TestPage from './pages/Test'
 import InfoPage from './pages/Info'
 import LogsPage from './pages/Logs'
+import Login from './components/Login'
+import { fetchAuthStatus, logoutAdmin } from './api/client'
+
+function IconLogout() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <polyline points="16 17 21 12 16 7" />
+      <line x1="21" y1="12" x2="9" y2="12" />
+    </svg>
+  )
+}
 
 function IconChart() {
   return (
@@ -88,6 +100,10 @@ function IconSidebarExpand() {
 }
 
 export default function App() {
+  const [authRequired, setAuthRequired] = useState(false)
+  const [loggedIn, setLoggedIn] = useState(true)
+  const [authChecking, setAuthChecking] = useState(true)
+
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem('ccrouter_sidebar_collapsed') === 'true'
@@ -95,6 +111,40 @@ export default function App() {
       return false
     }
   })
+
+  useEffect(() => {
+    let mounted = true
+    const checkAuth = async () => {
+      try {
+        const res = await fetchAuthStatus()
+        if (mounted) {
+          setAuthRequired(res.auth_required)
+          setLoggedIn(res.logged_in)
+        }
+      } catch (err) {
+        console.error('Failed to check auth status', err)
+      } finally {
+        if (mounted) {
+          setAuthChecking(false)
+        }
+      }
+    }
+    checkAuth()
+
+    const onUnauthorized = () => {
+      setLoggedIn(false)
+    }
+    window.addEventListener('ccrouter:unauthorized', onUnauthorized)
+    return () => {
+      mounted = false
+      window.removeEventListener('ccrouter:unauthorized', onUnauthorized)
+    }
+  }, [])
+
+  const handleLogout = async () => {
+    await logoutAdmin()
+    setLoggedIn(false)
+  }
 
   const toggleCollapsed = () => {
     setCollapsed(prev => {
@@ -104,6 +154,14 @@ export default function App() {
       } catch {}
       return next
     })
+  }
+
+  if (authChecking) {
+    return null
+  }
+
+  if (authRequired && !loggedIn) {
+    return <Login onLoginSuccess={() => setLoggedIn(true)} />
   }
 
   return (
@@ -146,7 +204,20 @@ export default function App() {
           </NavLink>
         </div>
         <div className="sidebar-footer">
-          <span>ccrouter</span> v0.1
+          <div className="footer-meta">
+            <span>ccrouter</span>
+            {!collapsed && <span style={{ opacity: 0.5 }}>v0.6.1</span>}
+          </div>
+          {authRequired && (
+            <button
+              className="sidebar-logout-btn"
+              onClick={handleLogout}
+              title={collapsed ? '退出登录' : undefined}
+            >
+              <IconLogout />
+              <span>退出登录</span>
+            </button>
+          )}
         </div>
       </nav>
       <main className="content">
@@ -162,3 +233,4 @@ export default function App() {
     </div>
   )
 }
+
