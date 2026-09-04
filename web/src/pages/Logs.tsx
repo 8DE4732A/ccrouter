@@ -215,6 +215,24 @@ function LogDetail({ record }: { record: LogRecord }) {
     ['响应 (Response)', record.response],
   ]
 
+  // Extract preview images if this is an images response (generations or edits)
+  const respBody = (record.response as Record<string, unknown> | undefined)?.body as Record<string, unknown> | undefined
+  const respImages: string[] = []
+  if (respBody && Array.isArray(respBody.data)) {
+    for (const item of respBody.data as Array<Record<string, unknown>>) {
+      if (item && typeof item.url === 'string' && item.url.startsWith('http')) {
+        respImages.push(item.url)
+      } else if (item && typeof item.b64_json === 'string' && item.b64_json.length > 50 && !item.b64_json.includes('truncated')) {
+        respImages.push(`data:image/png;base64,${item.b64_json}`)
+      }
+    }
+  }
+
+  // Check if client request was multipart/form-data
+  const clientBody = (record.request?.client as Record<string, unknown> | undefined)?.body as Record<string, unknown> | undefined
+  const isMultipart = clientBody && clientBody._type === 'multipart/form-data'
+  const multipartFiles = isMultipart && Array.isArray(clientBody.files) ? (clientBody.files as Array<Record<string, unknown>>) : []
+
   return (
     <div style={{
       background: 'var(--bg-panel)',
@@ -222,6 +240,43 @@ function LogDetail({ record }: { record: LogRecord }) {
       borderBottom: '1px solid var(--border)',
       padding: '12px 16px',
     }}>
+      {respImages.length > 0 && (
+        <div style={{ marginBottom: 14 }}>
+          <div style={{
+            fontSize: 11, fontWeight: 600, textTransform: 'uppercase',
+            letterSpacing: '0.06em', color: 'var(--text-3)', marginBottom: 6,
+          }}>
+            生成/编辑图像预览 ({respImages.length})
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+            {respImages.map((src, idx) => (
+              <a key={idx} href={src} target="_blank" rel="noopener noreferrer">
+                <img
+                  src={src}
+                  alt={`预览 ${idx + 1}`}
+                  style={{
+                    maxHeight: 180, maxWidth: 240, objectFit: 'contain',
+                    borderRadius: 4, border: '1px solid var(--border)',
+                    background: 'var(--bg)',
+                  }}
+                />
+              </a>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isMultipart && multipartFiles.length > 0 && (
+        <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-3)', fontWeight: 600 }}>附件文件:</span>
+          {multipartFiles.map((f, idx) => (
+            <span key={idx} className="tag blue" style={{ fontSize: 11 }}>
+              📎 {String(f.field)}: {String(f.filename || 'blob')} ({f.size_bytes != null ? `${((Number(f.size_bytes)) / 1024).toFixed(1)} KB` : ''})
+            </span>
+          ))}
+        </div>
+      )}
+
       {sections.map(([title, data]) => (
         <div key={title} style={{ marginBottom: 12 }}>
           <div style={{

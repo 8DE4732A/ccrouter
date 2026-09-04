@@ -214,6 +214,8 @@ export default function TestPage() {
   const [state, setState] = useState<SendState>('idle')
   const [blocks, setBlocks] = useState<OutputBlock[]>([])
   const [imageUrls, setImageUrls] = useState<string[]>([])
+  const [editImageFile, setEditImageFile] = useState<File | null>(null)
+  const [editMaskFile, setEditMaskFile] = useState<File | null>(null)
   const [errMsg, setErrMsg] = useState('')
   const [usage, setUsage] = useState<{ prompt?: number; completion?: number; total?: number } | null>(null)
   const [elapsed, setElapsed] = useState<number | null>(null)
@@ -301,9 +303,14 @@ export default function TestPage() {
 
   // Available formats for selected combo
   const selectedCombo = flatCombos.find(c => getFullID(c) === comboName || c.name === comboName)
-  const availableFormats: ApiFormat[] = selectedCombo
-    ? normalizeFormats(selectedCombo.api_format ?? 'openai')
-    : ['openai']
+  const availableFormats: ApiFormat[] = useMemo(() => {
+    if (!selectedCombo) return ['openai']
+    const raw = normalizeFormats(selectedCombo.api_format ?? 'openai')
+    if (raw.includes('openai-images') && !raw.includes('openai-image-edits')) {
+      return [...raw, 'openai-image-edits']
+    }
+    return raw
+  }, [selectedCombo])
 
 
   // When testing the Anthropic format, at least one auth header must stay
@@ -336,19 +343,48 @@ export default function TestPage() {
     abortRef.current = ctrl
 
     try {
-      const body = buildBody(fmt, comboName, prompt.trim(), stream, imageSizeCustom.trim() || imageSize, thinking)
       const useBearer = fmt === 'anthropic' ? authBearer : true
       const useXApiKey = fmt === 'anthropic' ? authXApiKey : false
-      const resp = await fetch(FMT_ENDPOINT[fmt], {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(apiKey && useBearer ? { 'Authorization': `Bearer ${apiKey}` } : {}),
-          ...(apiKey && useXApiKey ? { 'X-Api-Key': apiKey } : {}),
-        },
-        body: JSON.stringify(body),
-        signal: ctrl.signal,
-      })
+      const authHeaders: Record<string, string> = {
+        ...(apiKey && useBearer ? { 'Authorization': `Bearer ${apiKey}` } : {}),
+        ...(apiKey && useXApiKey ? { 'X-Api-Key': apiKey } : {}),
+      }
+
+      let resp: Response
+      if (fmt === 'openai-image-edits') {
+        if (!editImageFile) {
+          setErrMsg('请先上传需要编辑的图像文件 (image)')
+          setState('idle')
+          return
+        }
+        const fd = new FormData()
+        fd.append('model', comboName)
+        fd.append('prompt', prompt.trim())
+        fd.append('image', editImageFile)
+        if (editMaskFile) {
+          fd.append('mask', editMaskFile)
+        }
+        const sz = imageSizeCustom.trim() || imageSize
+        if (sz && sz !== 'custom') fd.append('size', sz)
+
+        resp = await fetch(FMT_ENDPOINT[fmt], {
+          method: 'POST',
+          headers: authHeaders,
+          body: fd,
+          signal: ctrl.signal,
+        })
+      } else {
+        const body = buildBody(fmt, comboName, prompt.trim(), stream, imageSizeCustom.trim() || imageSize, thinking)
+        resp = await fetch(FMT_ENDPOINT[fmt], {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...authHeaders,
+          },
+          body: JSON.stringify(body),
+          signal: ctrl.signal,
+        })
+      }
       setStatusCode(resp.status)
 
       if (!resp.ok) {
@@ -382,7 +418,7 @@ export default function TestPage() {
         if (parsed) setUsage(parsed)
         try {
           const obj = JSON.parse(text)
-          if (fmt === 'openai-images') {
+          if (fmt === 'openai-images' || fmt === 'openai-image-edits') {
             const urls: string[] = (obj.data ?? []).map((d: { url?: string; b64_json?: string }) =>
               d.url ?? (d.b64_json ? `data:image/png;base64,${d.b64_json}` : null)
             ).filter(Boolean)
@@ -508,7 +544,7 @@ export default function TestPage() {
                         style={{ fontSize: 12, padding: '4px 10px', ...(fmt !== f ? {} : {}) }}
                         onClick={() => {
                           setFmt(f)
-                          if (f === 'openai-images' || f === 'openai-embeddings') setStream(false)
+                          if (f === 'openai-images' || f === 'openai-image-edits' || f === 'openai-embeddings') setStream(false)
                         }}
                         disabled={state === 'streaming' || state === 'sending'}
                       >
@@ -525,11 +561,11 @@ export default function TestPage() {
                       type="checkbox"
                       checked={stream}
                       onChange={e => setStream(e.target.checked)}
-                      disabled={fmt === 'openai-images' || fmt === 'openai-embeddings' || state === 'streaming' || state === 'sending'}
+                      disabled={fmt === 'openai-images' || fmt === 'openai-image-edits' || fmt === 'openai-embeddings' || state === 'streaming' || state === 'sending'}
                     />
                     <span className="field-label">流式响应（SSE）</span>
-                    {(fmt === 'openai-images' || fmt === 'openai-embeddings') && (
-                      <span className="dim">— {fmt === 'openai-images' ? '图像 API' : '向量 API'} 不支持流式</span>
+                    {(fmt === 'openai-images' || fmt === 'openai-image-edits' || fmt === 'openai-embeddings') && (
+                      <span className="dim">— {fmt === 'openai-images' ? '图像 API' : fmt === 'openai-image-edits' ? '图像编辑 API' : '向量 API'} 不支持流式</span>
                     )}
                   </label>
                 </div>
@@ -566,7 +602,48 @@ export default function TestPage() {
                   </div>
                 )}
 
-                {fmt === 'openai-images' && (
+                {fmt === 'openai-image-edits' && (
+                  <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <div>
+                      <div className="field-label" style={{ marginBottom: 4 }}>
+                        原图 (image) <span style={{ color: 'var(--err-fg)' }}>*</span>
+                        <span className="dim" style={{ marginLeft: 6 }}>PNG / JPEG，需小于 4MB</span>
+                      </div>
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={e => setEditImageFile(e.target.files?.[0] ?? null)}
+                        disabled={state === 'sending'}
+                        style={{ fontSize: 12 }}
+                      />
+                      {editImageFile && (
+                        <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>
+                          已选: {editImageFile.name} ({(editImageFile.size / 1024).toFixed(1)} KB)
+                        </div>
+                      )}
+                    </div>
+                    <div>
+                      <div className="field-label" style={{ marginBottom: 4 }}>
+                        遮罩图 (mask) <span className="dim" style={{ marginLeft: 4 }}>可选</span>
+                        <span className="dim" style={{ marginLeft: 6 }}>PNG，需与原图同尺寸</span>
+                      </div>
+                      <input
+                        type="file"
+                        accept="image/png"
+                        onChange={e => setEditMaskFile(e.target.files?.[0] ?? null)}
+                        disabled={state === 'sending'}
+                        style={{ fontSize: 12 }}
+                      />
+                      {editMaskFile && (
+                        <div style={{ fontSize: 11, color: 'var(--text-3)', marginTop: 2 }}>
+                          已选: {editMaskFile.name} ({(editMaskFile.size / 1024).toFixed(1)} KB)
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {(fmt === 'openai-images' || fmt === 'openai-image-edits') && (
                   <div style={{ marginTop: 12 }}>
                     <div className="field-label" style={{ marginBottom: 6 }}>图像尺寸</div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -621,13 +698,14 @@ export default function TestPage() {
           <div className="card">
             <div className="card-body-simple">
               <div className="field-label" style={{ marginBottom: 6 }}>
-                {fmt === 'openai-images' ? '图像描述（prompt）' : fmt === 'openai-embeddings' ? '待向量化文本（input）' : '提示词'}
+                {fmt === 'openai-images' ? '图像描述（prompt）' : fmt === 'openai-image-edits' ? '编辑指令（prompt）' : fmt === 'openai-embeddings' ? '待向量化文本（input）' : '提示词'}
               </div>
               <textarea
                 value={prompt}
                 onChange={e => setPrompt(e.target.value)}
                 placeholder={
                   fmt === 'openai-images' ? '描述你想生成的图像，例如：a cute cat sitting on a cloud' :
+                  fmt === 'openai-image-edits' ? '描述要修改的内容，例如：给猫戴上一顶红色帽子' :
                   fmt === 'openai-embeddings' ? '输入需要向量化的文本，例如：The quick brown fox jumps over the lazy dog' :
                   '输入测试消息，例如：你好，简单介绍一下自己'
                 }

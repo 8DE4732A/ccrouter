@@ -419,6 +419,40 @@ func TestEmbeddingsRoute(t *testing.T) {
 	}
 }
 
+func TestImageEditsRoute(t *testing.T) {
+	st, _ := newTestStateWithYAML(t, testConfigYAMLWithAPIKeys)
+	r := Router(st)
+
+	// Unauthorized request -> 401
+	rec := doJSON(t, r, "POST", "/v1/images/edits", map[string]any{
+		"model": "dall-e-2",
+	})
+	if rec.Code != 401 {
+		t.Fatalf("expected 401 unauthorized for /v1/images/edits without key, got %d", rec.Code)
+	}
+
+	// Authorized request with key -> reaches proxy (returns 400 since combo not in this test YAML)
+	req := httptest.NewRequest("POST", "/v1/images/edits", strings.NewReader(`{"model":"unknown-model"}`))
+	req.Header.Set("Authorization", "Bearer correct-key")
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 unknown combo for authorized request, got %d", rec.Code)
+	}
+
+	// Singular /v1/images/edit should be 404 Not Found
+	reqSingular := httptest.NewRequest("POST", "/v1/images/edit", strings.NewReader(`{"model":"unknown-model"}`))
+	reqSingular.Header.Set("Authorization", "Bearer correct-key")
+	reqSingular.Header.Set("Content-Type", "application/json")
+	recSingular := httptest.NewRecorder()
+	r.ServeHTTP(recSingular, reqSingular)
+	if recSingular.Code != 404 {
+		t.Fatalf("expected 404 for singular /v1/images/edit, got %d", recSingular.Code)
+	}
+}
+
+
 func TestAdminAuthentication(t *testing.T) {
 	// 1. Unauthenticated mode (admin_password not set)
 	stNoAuth, _ := newTestState(t)

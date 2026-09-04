@@ -48,22 +48,24 @@ const RequestTimeoutDisabled = -1
 
 // validClientFormats are formats the proxy exposes to clients (server routes exist for each).
 var validClientFormats = map[string]bool{
-	"openai":            true,
-	"anthropic":         true,
-	"openai-responses":  true,
-	"openai-images":     true,
-	"openai-embeddings": true,
+	"openai":             true,
+	"anthropic":          true,
+	"openai-responses":   true,
+	"openai-images":      true,
+	"openai-image-edits": true,
+	"openai-embeddings":  true,
 }
 
 // validAPIFormats includes all formats valid for upstream endpoints and upstream_api_format hints.
 // Gemini is upstream-only: no client-facing route is registered for it.
 var validAPIFormats = map[string]bool{
-	"openai":            true,
-	"anthropic":         true,
-	"openai-responses":  true,
-	"openai-images":     true,
-	"openai-embeddings": true,
-	"gemini":            true,
+	"openai":             true,
+	"anthropic":          true,
+	"openai-responses":   true,
+	"openai-images":      true,
+	"openai-image-edits": true,
+	"openai-embeddings":  true,
+	"gemini":             true,
 }
 
 var validKeyStrategies = map[string]bool{
@@ -119,6 +121,8 @@ func (e *ApiEndpoint) ChatURL() string {
 		return base + "/responses"
 	case "openai-images":
 		return base + "/images/generations"
+	case "openai-image-edits":
+		return base + "/images/edits"
 	case "openai-embeddings":
 		return base + "/embeddings"
 	case "gemini":
@@ -157,6 +161,9 @@ func (p *ProviderConfig) SupportsFormat(fmt string) bool {
 			return true
 		}
 	}
+	if fmt == "openai-image-edits" {
+		return p.SupportsFormat("openai-images")
+	}
 	return false
 }
 
@@ -165,6 +172,14 @@ func (p *ProviderConfig) GetChatURL(fmt string) string {
 	for _, ep := range p.APIs {
 		if ep.APIFormat == fmt {
 			return ep.ChatURL()
+		}
+	}
+	if fmt == "openai-image-edits" {
+		for _, ep := range p.APIs {
+			if ep.APIFormat == "openai-images" {
+				base := strings.TrimRight(ep.BaseURL, "/")
+				return base + "/images/edits"
+			}
 		}
 	}
 	return ""
@@ -254,6 +269,21 @@ func (c *ComboConfig) APIFormats() []string {
 		return nil
 	}
 }
+
+// SupportsFormat reports whether this combo accepts requests in the given format.
+// If fmt is "openai-image-edits" and not explicitly configured, it inherits "openai-images".
+func (c *ComboConfig) SupportsFormat(fmt string) bool {
+	for _, f := range c.APIFormats() {
+		if f == fmt {
+			return true
+		}
+	}
+	if fmt == "openai-image-edits" {
+		return c.SupportsFormat("openai-images")
+	}
+	return false
+}
+
 
 type PayloadScript struct {
 	Name    string `json:"name" yaml:"name"`

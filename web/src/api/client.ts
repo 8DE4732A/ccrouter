@@ -92,13 +92,14 @@ export type ComboMember = {
   upstream_api_format?: string  // optional: override the API format sent to this upstream
 }
 
-export type ApiFormat = 'openai' | 'anthropic' | 'openai-responses' | 'openai-images' | 'openai-embeddings' | 'gemini'
+export type ApiFormat = 'openai' | 'anthropic' | 'openai-responses' | 'openai-images' | 'openai-image-edits' | 'openai-embeddings' | 'gemini'
 
 export const FMT_ENDPOINT: Record<ApiFormat, string> = {
   'openai': '/v1/chat/completions',
   'anthropic': '/v1/messages',
   'openai-responses': '/v1/responses',
   'openai-images': '/v1/images/generations',
+  'openai-image-edits': '/v1/images/edits',
   'openai-embeddings': '/v1/embeddings',
   'gemini': '/v1beta/models',
 }
@@ -108,6 +109,7 @@ export const FMT_COLOR: Record<ApiFormat, string> = {
   'anthropic': 'blue',
   'openai-responses': 'amber',
   'openai-images': 'amber',
+  'openai-image-edits': 'orange',
   'openai-embeddings': 'cyan',
   'gemini': 'purple',
 }

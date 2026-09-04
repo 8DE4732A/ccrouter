@@ -1,7 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -695,5 +700,227 @@ func TestEmbeddingsProxy(t *testing.T) {
 		t.Fatalf("unexpected response body: %s", w.Body.String())
 	}
 }
+
+func TestExtractModelAndRewriteMultipart(t *testing.T) {
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("model", "original-combo")
+	_ = mw.WriteField("prompt", "draw a hat on cat")
+	part, err := mw.CreateFormFile("image", "cat.png")
+	if err != nil {
+		t.Fatalf("CreateFormFile: %v", err)
+	}
+	_, _ = part.Write([]byte("fake-png-data"))
+	_ = mw.Close()
+
+	ct := mw.FormDataContentType()
+	if !isMultipart(ct) {
+		t.Fatalf("expected isMultipart to be true for %s", ct)
+	}
+
+	gotModel := extractModel(buf.Bytes(), ct)
+	if gotModel != "original-combo" {
+		t.Fatalf("expected original-combo, got %q", gotModel)
+	}
+
+	rewritten, newCT, err := rewriteModelMultipart(buf.Bytes(), ct, "upstream-model")
+	if err != nil {
+		t.Fatalf("rewriteModelMultipart failed: %v", err)
+	}
+	if !isMultipart(newCT) {
+		t.Fatalf("expected newCT to be multipart, got %s", newCT)
+	}
+
+	// Verify rewritten body model
+	newModel := extractModel(rewritten, newCT)
+	if newModel != "upstream-model" {
+		t.Fatalf("expected upstream-model after rewrite, got %q", newModel)
+	}
+
+	// Verify other fields & file still exist
+	_, params, _ := mime.ParseMediaType(newCT)
+	mr := multipart.NewReader(bytes.NewReader(rewritten), params["boundary"])
+	foundPrompt := false
+	foundImage := false
+	for {
+		p, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("reading rewritten part: %v", err)
+		}
+		if p.FormName() == "prompt" {
+			val, _ := io.ReadAll(p)
+			if string(val) == "draw a hat on cat" {
+				foundPrompt = true
+			}
+		}
+		if p.FormName() == "image" && p.FileName() == "cat.png" {
+			val, _ := io.ReadAll(p)
+			if string(val) == "fake-png-data" {
+				foundImage = true
+			}
+		}
+	}
+	if !foundPrompt || !foundImage {
+		t.Fatalf("rewritten multipart lost data: prompt=%v, image=%v", foundPrompt, foundImage)
+	}
+}
+
+func TestSanitizeBodyForLog(t *testing.T) {
+	// Multipart sanitization
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	_ = mw.WriteField("model", "dall-e-2")
+	_ = mw.WriteField("prompt", "a hat")
+	part, _ := mw.CreateFormFile("image", "sample.png")
+	_, _ = part.Write([]byte("1234567890"))
+	_ = mw.Close()
+
+	sanitized := sanitizeBodyForLog(buf.Bytes(), mw.FormDataContentType())
+	smap, ok := sanitized.(map[string]any)
+	if !ok {
+		t.Fatalf("expected map[string]any, got %T", sanitized)
+	}
+	if smap["_type"] != "multipart/form-data" {
+		t.Fatalf("expected _type multipart/form-data, got %v", smap["_type"])
+	}
+	fields := smap["fields"].(map[string]any)
+	if fields["prompt"] != "a hat" || fields["model"] != "dall-e-2" {
+		t.Fatalf("unexpected fields: %v", fields)
+	}
+	files := smap["files"].([]map[string]any)
+	if len(files) != 1 || files[0]["field"] != "image" || files[0]["filename"] != "sample.png" || files[0]["size_bytes"] != int64(10) {
+		t.Fatalf("unexpected files summary: %v", files)
+	}
+
+	// JSON response b64_json truncation
+	hugeB64 := strings.Repeat("A", 300)
+	respJSON := fmt.Sprintf(`{"data":[{"b64_json":"%s"}]}`, hugeB64)
+	sanitizedResp := sanitizeResponseBodyForLog([]byte(respJSON))
+	respMap := sanitizedResp.(map[string]any)
+	dataArr := respMap["data"].([]any)
+	firstItem := dataArr[0].(map[string]any)
+	b64Val := firstItem["b64_json"].(string)
+	if !strings.Contains(b64Val, "... [truncated 300 chars]") {
+		t.Fatalf("expected b64_json to be truncated, got %q", b64Val)
+	}
+}
+
+func TestImageEditsProxyMultipart(t *testing.T) {
+	var receivedPath string
+	var receivedAuth string
+	var receivedModel string
+	var receivedPrompt string
+	var receivedFileBytes []byte
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		receivedAuth = r.Header.Get("Authorization")
+		mediaType, params, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+		if err == nil && strings.HasPrefix(mediaType, "multipart/") {
+			mr := multipart.NewReader(r.Body, params["boundary"])
+			for {
+				p, err := mr.NextPart()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					break
+				}
+				if p.FormName() == "model" {
+					val, _ := io.ReadAll(p)
+					receivedModel = string(val)
+				} else if p.FormName() == "prompt" {
+					val, _ := io.ReadAll(p)
+					receivedPrompt = string(val)
+				} else if p.FormName() == "image" {
+					receivedFileBytes, _ = io.ReadAll(p)
+				}
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{
+			"created": 1589478378,
+			"data": [
+				{"url": "https://upstream.test/output.png"}
+			]
+		}`))
+	}))
+	defer upstream.Close()
+
+	// Provider has openai-images. Combo has openai-images.
+	// Both should auto-inherit openai-image-edits!
+	cfg := &config.AppConfig{
+		Providers: []config.ProviderConfig{
+			{
+				Name:        "sn-img",
+				APIs:        []config.ApiEndpoint{{APIFormat: "openai-images", BaseURL: upstream.URL}},
+				MaxRetries:  1,
+				KeyStrategy: "fill-first",
+				Keys:        []config.KeyConfig{{Key: "sk-img-key"}},
+			},
+		},
+		Combos: []config.ComboConfig{
+			{
+				Name:      "img-edit-combo",
+				APIFormat: "openai-images", // auto-inherits openai-image-edits
+				Strategy:  "fill-first",
+				Members: []config.ComboMember{
+					{Provider: "sn-img", Model: "dall-e-2"},
+				},
+			},
+		},
+	}
+
+	kms := map[string]*keys.Manager{
+		"sn-img": keys.NewManager("sn-img", []string{"sk-img-key"}, "fill-first"),
+	}
+	recRecorder, _ := db.NewRecorder(filepath.Join(t.TempDir(), "test.db"))
+	svc, err := New(cfg, kms, combos.NewRouter(cfg.Combos), map[string]*http.Client{}, recRecorder, nil)
+	if err != nil {
+		t.Fatalf("New service: %v", err)
+	}
+
+	var reqBody bytes.Buffer
+	mw := multipart.NewWriter(&reqBody)
+	_ = mw.WriteField("model", "img-edit-combo")
+	_ = mw.WriteField("prompt", "make background blue")
+	part, _ := mw.CreateFormFile("image", "input.png")
+	_, _ = part.Write([]byte("raw-png-bytes-12345"))
+	_ = mw.Close()
+
+	req := httptest.NewRequest("POST", "/v1/images/edits", &reqBody)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer client-key")
+	w := httptest.NewRecorder()
+
+	svc.Handle(w, req, "openai-image-edits", true)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if receivedPath != "/images/edits" {
+		t.Fatalf("expected upstream path /images/edits, got %q", receivedPath)
+	}
+	if receivedAuth != "Bearer sk-img-key" {
+		t.Fatalf("expected upstream auth Bearer sk-img-key, got %q", receivedAuth)
+	}
+	if receivedModel != "dall-e-2" {
+		t.Fatalf("expected upstream model dall-e-2, got %q", receivedModel)
+	}
+	if receivedPrompt != "make background blue" {
+		t.Fatalf("expected prompt 'make background blue', got %q", receivedPrompt)
+	}
+	if string(receivedFileBytes) != "raw-png-bytes-12345" {
+		t.Fatalf("expected image bytes 'raw-png-bytes-12345', got %q", string(receivedFileBytes))
+	}
+	if !strings.Contains(w.Body.String(), "https://upstream.test/output.png") {
+		t.Fatalf("unexpected client response: %s", w.Body.String())
+	}
+}
+
 
 

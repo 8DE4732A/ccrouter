@@ -169,6 +169,68 @@ combos:
 	}
 }
 
+func TestImageEditsFormat(t *testing.T) {
+	const imgYAML = `
+providers:
+  - name: sn-img
+    api:
+      - api_format: openai-images
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-img
+    health_check_rules: []
+  - name: sn-edits
+    api:
+      - api_format: openai-image-edits
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-edits
+    health_check_rules: []
+combos:
+  - name: img-combo
+    api_format: openai-images
+    members:
+      - provider: sn-img
+        model: dall-e-2
+  - name: edits-combo
+    api_format: openai-image-edits
+    members:
+      - provider: sn-edits
+        model: dall-e-2
+`
+	cfg := loadFromText(t, imgYAML)
+	pImg := &cfg.Providers[0]
+	// Auto-inherited from openai-images
+	if !pImg.SupportsFormat("openai-image-edits") {
+		t.Fatal("expected openai-image-edits auto-inherited support for provider")
+	}
+	if got := pImg.GetChatURL("openai-image-edits"); got != "https://upstream.test/v1/images/edits" {
+		t.Fatalf("unexpected edits url: %s", got)
+	}
+
+	pEdits := &cfg.Providers[1]
+	// Explicit openai-image-edits
+	if !pEdits.SupportsFormat("openai-image-edits") {
+		t.Fatal("expected explicit openai-image-edits support for provider")
+	}
+	if got := pEdits.GetChatURL("openai-image-edits"); got != "https://upstream.test/v1/images/edits" {
+		t.Fatalf("unexpected edits url: %s", got)
+	}
+
+	cImg := &cfg.Combos[0]
+	// Combo auto-inherited support
+	if !cImg.SupportsFormat("openai-image-edits") {
+		t.Fatal("expected openai-image-edits auto-inherited support for combo")
+	}
+
+	cEdits := &cfg.Combos[1]
+	// Combo explicit support
+	if !cEdits.SupportsFormat("openai-image-edits") {
+		t.Fatal("expected explicit openai-image-edits support for combo")
+	}
+}
+
+
 func mustReject(t *testing.T, text string) {
 	t.Helper()
 	dir := t.TempDir()

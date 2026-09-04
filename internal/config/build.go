@@ -344,7 +344,7 @@ func buildProvider(p map[string]any, idx int) (*ProviderConfig, error) {
 		}
 		af := lower(strVal(em["api_format"]))
 		if !validAPIFormats[af] {
-			return nil, errf("providers[%d].api[%d].api_format must be one of: openai, anthropic, openai-responses, openai-images, openai-embeddings, gemini", idx, k)
+			return nil, errf("providers[%d].api[%d].api_format must be one of: openai, anthropic, openai-responses, openai-images, openai-image-edits, openai-embeddings, gemini", idx, k)
 		}
 		if seenFormats[af] {
 			return nil, errf("providers[%d].api: duplicate api_format %q", idx, af)
@@ -551,7 +551,7 @@ func buildCombo(c map[string]any, ctx string, providerMap map[string]*ProviderCo
 	for _, f := range rawFormats {
 		f = lower(f)
 		if !validClientFormats[f] {
-			return nil, errf("%s.api_format %q is not a valid client-facing format (valid: openai, anthropic, openai-responses, openai-images, openai-embeddings)", ctx, f)
+			return nil, errf("%s.api_format %q is not a valid client-facing format (valid: openai, anthropic, openai-responses, openai-images, openai-image-edits, openai-embeddings)", ctx, f)
 		}
 		formats = append(formats, f)
 	}

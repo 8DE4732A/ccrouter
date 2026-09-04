@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"strings"
@@ -132,7 +134,10 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 	if !forceNonStream {
 		isStream = isStreamingRequest(r, body)
 	}
-	requestedModel := extractModel(body)
+	requestedModel := extractModel(body, r.Header.Get("Content-Type"))
+	if requestedModel == "" && apiFormat == "openai-image-edits" {
+		requestedModel = "dall-e-2"
+	}
 
 	// Capture client context once for verbose logging (zero-cost when disabled).
 	var clientCtx map[string]any
@@ -141,7 +146,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 			"method":  r.Method,
 			"path":    r.URL.Path,
 			"headers": headerToMap(r.Header),
-			"body":    tryParseJSON(body),
+			"body":    sanitizeBodyForLog(body, r.Header.Get("Content-Type")),
 		}
 	}
 
@@ -150,7 +155,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		jsonError(w, 400, fmt.Sprintf("unknown combo: %q", requestedModel), "proxy_error")
 		return
 	}
-	if !containsString(combo.APIFormats(), apiFormat) {
+	if !combo.SupportsFormat(apiFormat) {
 		jsonError(w, 400, fmt.Sprintf("combo %q supports formats %v, but request was sent to %q endpoint",
 			requestedModel, combo.APIFormats(), apiFormat), "proxy_error")
 		return
@@ -185,7 +190,20 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		}
 
 		// Translate request body when the resolved upstream format differs from the client format.
-		clientBody := rewriteModel(body, model)
+		var clientBody []byte
+		var upstreamContentType string
+		reqContentType := r.Header.Get("Content-Type")
+		if isMultipart(reqContentType) {
+			newBody, newCT, err := rewriteModelMultipart(body, reqContentType, model)
+			if err != nil {
+				jsonError(w, 400, fmt.Sprintf("invalid multipart body: %v", err), "invalid_request_error")
+				return
+			}
+			clientBody = newBody
+			upstreamContentType = newCT
+		} else {
+			clientBody = rewriteModel(body, model)
+		}
 		upstreamBody := clientBody
 		var translationTag string // e.g. "anthropic→openai", appended to matched_payload
 		if upstreamFmt != apiFormat {
@@ -222,6 +240,9 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 			}
 			attemptedKeys[key] = true
 			headers := buildHeaders(r, key, upstreamFmt)
+			if upstreamContentType != "" {
+				headers.Set("Content-Type", upstreamContentType)
+			}
 
 			// Run enabled payload scripts in order (chained).
 			// Scripts operate on the upstream body (already translated).
@@ -237,7 +258,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 				upstreamCtx = map[string]any{
 					"url":     targetURL,
 					"headers": headerToMap(headers),
-					"body":    tryParseJSON(actualBody),
+					"body":    sanitizeBodyForLog(actualBody, headers.Get("Content-Type")),
 				}
 			}
 
@@ -384,7 +405,7 @@ func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Reque
 			map[string]any{
 				"status_code": statusCode,
 				"headers":     headerToMap(resp.Header),
-				"body":        tryParseJSON(outBody),
+				"body":        sanitizeResponseBodyForLog(outBody),
 			})
 	}
 
@@ -547,7 +568,7 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, r *http.Request, t0
 			map[string]any{
 				"status_code": statusCode,
 				"headers":     headerToMap(resp.Header),
-				"body":        tryParseJSON(outBody),
+				"body":        sanitizeResponseBodyForLog(outBody),
 			})
 	}
 
@@ -635,13 +656,100 @@ func containsString(list []string, s string) bool {
 
 // ---- Request helpers ----
 
-func extractModel(body []byte) string {
+func isMultipart(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	return err == nil && strings.HasPrefix(mediaType, "multipart/")
+}
+
+func extractModel(body []byte, contentType string) string {
+	if isMultipart(contentType) {
+		_, params, err := mime.ParseMediaType(contentType)
+		if err == nil {
+			boundary := params["boundary"]
+			if boundary != "" {
+				mr := multipart.NewReader(bytes.NewReader(body), boundary)
+				for {
+					p, err := mr.NextPart()
+					if err != nil {
+						break
+					}
+					if p.FormName() == "model" {
+						val, _ := io.ReadAll(p)
+						m := strings.TrimSpace(string(val))
+						if m != "" {
+							return m
+						}
+					}
+				}
+			}
+		}
+		return "dall-e-2"
+	}
+
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
 		return ""
 	}
 	m, _ := data["model"].(string)
 	return m
+}
+
+func rewriteModelMultipart(body []byte, contentType, targetModel string) ([]byte, string, error) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
+		return body, contentType, nil
+	}
+	boundary := params["boundary"]
+	if boundary == "" {
+		return body, contentType, nil
+	}
+
+	mr := multipart.NewReader(bytes.NewReader(body), boundary)
+	var out bytes.Buffer
+	mw := multipart.NewWriter(&out)
+
+	modelWritten := false
+
+	for {
+		part, err := mr.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", err
+		}
+
+		formName := part.FormName()
+		if formName == "model" {
+			if targetModel != "" {
+				if err := mw.WriteField("model", targetModel); err != nil {
+					return nil, "", err
+				}
+				modelWritten = true
+			}
+			continue
+		}
+
+		pw, err := mw.CreatePart(part.Header)
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := io.Copy(pw, part); err != nil {
+			return nil, "", err
+		}
+	}
+
+	if !modelWritten && targetModel != "" {
+		if err := mw.WriteField("model", targetModel); err != nil {
+			return nil, "", err
+		}
+	}
+
+	if err := mw.Close(); err != nil {
+		return nil, "", err
+	}
+
+	return out.Bytes(), mw.FormDataContentType(), nil
 }
 
 func rewriteModel(body []byte, model string) []byte {
@@ -1051,6 +1159,88 @@ func tryParseJSON(b []byte) any {
 		return v
 	}
 	return string(b)
+}
+
+func sanitizeBodyForLog(body []byte, contentType string) any {
+	if isMultipart(contentType) {
+		_, params, err := mime.ParseMediaType(contentType)
+		if err == nil {
+			boundary := params["boundary"]
+			if boundary != "" {
+				mr := multipart.NewReader(bytes.NewReader(body), boundary)
+				fields := make(map[string]any)
+				files := make([]map[string]any, 0)
+				for {
+					p, err := mr.NextPart()
+					if err != nil {
+						break
+					}
+					fn := p.FileName()
+					formName := p.FormName()
+					if fn != "" || formName == "image" || formName == "mask" {
+						ct := p.Header.Get("Content-Type")
+						if ct == "" {
+							ct = "application/octet-stream"
+						}
+						n, _ := io.Copy(io.Discard, p)
+						files = append(files, map[string]any{
+							"field":        formName,
+							"filename":     fn,
+							"content_type": ct,
+							"size_bytes":   n,
+						})
+					} else {
+						val, _ := io.ReadAll(p)
+						fields[formName] = string(val)
+					}
+				}
+				return map[string]any{
+					"_type":  "multipart/form-data",
+					"fields": fields,
+					"files":  files,
+				}
+			}
+		}
+	}
+	return sanitizeResponseBodyForLog(body)
+}
+
+func sanitizeResponseBodyForLog(b []byte) any {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		if len(b) > 2048 {
+			return string(b[:2048]) + fmt.Sprintf("... [truncated %d bytes]", len(b))
+		}
+		return string(b)
+	}
+	return truncateB64InJSON(v)
+}
+
+func truncateB64InJSON(v any) any {
+	switch val := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(val))
+		for k, item := range val {
+			if k == "b64_json" {
+				if s, ok := item.(string); ok && len(s) > 128 {
+					out[k] = s[:64] + fmt.Sprintf("... [truncated %d chars]", len(s))
+				} else {
+					out[k] = item
+				}
+			} else {
+				out[k] = truncateB64InJSON(item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]any, len(val))
+		for i, item := range val {
+			out[i] = truncateB64InJSON(item)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // resolveUpstreamFormat decides which API format to use when sending to the upstream provider.

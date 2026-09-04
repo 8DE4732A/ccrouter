@@ -123,7 +123,7 @@ combos:
             model: "deepseek-v4-flash"
 
       # -------------------------------------------------------------------
-      # 图像生成 combo
+      # 图像生成与编辑 combo (配置 openai-images 自动支持 POST /v1/images/edits)
       # -------------------------------------------------------------------
       - name: "image"
         api_format: openai-images

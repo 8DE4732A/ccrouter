@@ -122,7 +122,7 @@ payload_scripts:        # 可选；转发前按顺序执行的改写脚本
 providers:
   - name: sensenova               # 唯一标识符，供 combo 引用
     api:
-      - api_format: openai        # openai | anthropic | openai-responses | openai-images | openai-embeddings
+      - api_format: openai        # openai | anthropic | openai-responses | openai-images | openai-image-edits | openai-embeddings
         base_url: "https://token.sensenova.cn/v1"
       - api_format: anthropic     # 同一组 key 可同时支持多种格式
         base_url: "https://token.sensenova.cn/v1"
@@ -250,7 +250,8 @@ payload_scripts:
 | `POST /v1/chat/completions` | OpenAI Chat Completions（格式：`openai`） |
 | `POST /v1/messages` | Anthropic Messages（格式：`anthropic`） |
 | `POST /v1/responses` | OpenAI Responses API（格式：`openai-responses`） |
-| `POST /v1/images/generations` | OpenAI Images（格式：`openai-images`） |
+| `POST /v1/images/generations` | OpenAI Image Generations（格式：`openai-images`） |
+| `POST /v1/images/edits` | OpenAI Image Edits（格式：`openai-image-edits`，配置 `openai-images` 时自动支持） |
 | `POST /v1/embeddings` | OpenAI Embeddings（格式：`openai-embeddings`） |
 | `GET /v1/models` | 返回所有可用 combo（含 alias），OpenAI 兼容格式 |
 | `GET /health` | 健康检查 |
