@@ -170,10 +170,19 @@ func Dump(cfg *AppConfig) map[string]any {
 		})
 	}
 
+	logging := map[string]any{
+		"enabled":           cfg.Logging.Enabled,
+		"dir":               cfg.Logging.Dir,
+		"max_file_size_mb":  cfg.Logging.MaxFileSizeMB,
+		"max_backups":       cfg.Logging.MaxBackups,
+		"compression_level": cfg.Logging.CompressionLevel,
+	}
+
 	out := map[string]any{
 		"providers":       providers,
 		"combos":          combos,
 		"verbose_logging": cfg.VerboseLogging,
+		"logging":         logging,
 		"payload_scripts": scripts,
 	}
 	if len(general) > 0 {

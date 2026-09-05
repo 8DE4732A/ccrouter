@@ -84,16 +84,22 @@ func boolFrom(v any) bool {
 // chunked segment (they stopped being written to the moment ccrouter
 // upgraded to this format).
 func (l *Logger) iterAllReversed() <-chan map[string]any {
+	l.writeMu.Lock()
+	active := l.active
+	logDir := l.logDir
+	backupCount := l.backupCount
+	l.writeMu.Unlock()
+
 	ch := make(chan map[string]any)
 	go func() {
 		defer close(ch)
-		if _, err := os.Stat(l.active); err == nil {
-			for rec := range readSegmentReversed(l.active) {
+		if _, err := os.Stat(active); err == nil {
+			for rec := range readSegmentReversed(active) {
 				ch <- rec
 			}
 		}
-		for i := 1; i <= l.backupCount; i++ {
-			seg := filepath.Join(l.logDir, segmentFilename+"."+strconv.Itoa(i))
+		for i := 1; i <= backupCount; i++ {
+			seg := filepath.Join(logDir, segmentFilename+"."+strconv.Itoa(i))
 			if _, err := os.Stat(seg); err != nil {
 				break
 			}
@@ -102,14 +108,14 @@ func (l *Logger) iterAllReversed() <-chan map[string]any {
 			}
 		}
 		// Legacy plain-JSONL format, read-only, for backward compatibility.
-		legacyActive := filepath.Join(l.logDir, legacySegmentFilename)
+		legacyActive := filepath.Join(logDir, legacySegmentFilename)
 		if _, err := os.Stat(legacyActive); err == nil {
 			for rec := range readLegacyPlainReversed(legacyActive) {
 				ch <- rec
 			}
 		}
-		for i := 1; i <= l.backupCount; i++ {
-			archive := filepath.Join(l.logDir, legacySegmentFilename+"."+strconv.Itoa(i)+".gz")
+		for i := 1; i <= backupCount; i++ {
+			archive := filepath.Join(logDir, legacySegmentFilename+"."+strconv.Itoa(i)+".gz")
 			if _, err := os.Stat(archive); err != nil {
 				break
 			}

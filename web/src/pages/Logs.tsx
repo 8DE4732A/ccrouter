@@ -13,6 +13,13 @@ export default function Logs() {
   const [err, setErr] = useState('')
 
   const [verbose, setVerbose] = useState(false)
+  const [dir, setDir] = useState('logs')
+  const [maxFileSizeMB, setMaxFileSizeMB] = useState(20)
+  const [maxBackups, setMaxBackups] = useState(10)
+  const [compressionLevel, setCompressionLevel] = useState('best')
+  const [showConfig, setShowConfig] = useState(false)
+  const [savingConfig, setSavingConfig] = useState(false)
+  const [settingsMsg, setSettingsMsg] = useState('')
   const [settingsErr, setSettingsErr] = useState('')
 
   // expandedTs → null (loading) | LogRecord (loaded) | string (error)
@@ -20,7 +27,13 @@ export default function Logs() {
 
   useEffect(() => {
     getLogSettings()
-      .then(s => setVerbose(s.verbose_logging))
+      .then(s => {
+        setVerbose(s.verbose_logging)
+        if (s.dir) setDir(s.dir)
+        if (s.max_file_size_mb) setMaxFileSizeMB(s.max_file_size_mb)
+        if (s.max_backups) setMaxBackups(s.max_backups)
+        if (s.compression_level) setCompressionLevel(s.compression_level)
+      })
       .catch(e => setSettingsErr(String(e)))
   }, [])
 
@@ -42,11 +55,44 @@ export default function Logs() {
 
   const toggleVerbose = async (next: boolean) => {
     setSettingsErr('')
+    setSettingsMsg('')
     try {
-      const res = await putLogSettings(next)
+      const res = await putLogSettings({
+        enabled: next,
+        dir,
+        max_file_size_mb: maxFileSizeMB,
+        max_backups: maxBackups,
+        compression_level: compressionLevel,
+      })
       setVerbose(res.verbose_logging)
     } catch (e: unknown) {
       setSettingsErr(String(e))
+    }
+  }
+
+  const saveAdvancedConfig = async () => {
+    setSavingConfig(true)
+    setSettingsErr('')
+    setSettingsMsg('')
+    try {
+      const res = await putLogSettings({
+        enabled: verbose,
+        dir: dir.trim() || 'logs',
+        max_file_size_mb: Number(maxFileSizeMB) || 20,
+        max_backups: Number(maxBackups) || 10,
+        compression_level: compressionLevel,
+      })
+      setVerbose(res.verbose_logging)
+      if (res.dir) setDir(res.dir)
+      if (res.max_file_size_mb) setMaxFileSizeMB(res.max_file_size_mb)
+      if (res.max_backups) setMaxBackups(res.max_backups)
+      if (res.compression_level) setCompressionLevel(res.compression_level)
+      setSettingsMsg('✓ 高级日志配置已保存并实时生效')
+      setTimeout(() => setSettingsMsg(''), 4000)
+    } catch (e: unknown) {
+      setSettingsErr(String(e))
+    } finally {
+      setSavingConfig(false)
     }
   }
 
@@ -87,23 +133,135 @@ export default function Logs() {
         <span className="page-sub">完整请求报文记录（点击行展开明细）</span>
       </div>
 
-      {/* Verbose toggle */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
-        <label style={{
-          display: 'flex', alignItems: 'center', gap: 8,
-          padding: '6px 12px',
-          border: `1px solid ${verbose ? 'var(--accent)' : 'var(--border-md)'}`,
-          borderRadius: 6,
-          background: verbose ? 'var(--accent-light)' : 'var(--bg-input)',
-          cursor: 'pointer', userSelect: 'none',
-        }}>
-          <input type="checkbox" checked={verbose} onChange={e => toggleVerbose(e.target.checked)} />
-          <span style={{ fontWeight: 600, fontSize: 13 }}>详细记录</span>
-        </label>
-        <span style={{ fontSize: 12, color: 'var(--warn-fg)', display: 'flex', alignItems: 'center', gap: 4 }}>
-          ⚠ 完整记录报文含明文 API 密钥，仅限本地使用，切勿暴露公网
-        </span>
-        {settingsErr && <span style={{ fontSize: 12, color: 'var(--err-fg)' }}>{settingsErr}</span>}
+      {/* Verbose toggle & Advanced settings */}
+      <div style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: 8,
+            padding: '6px 12px',
+            border: `1px solid ${verbose ? 'var(--accent)' : 'var(--border-md)'}`,
+            borderRadius: 6,
+            background: verbose ? 'var(--accent-light)' : 'var(--bg-input)',
+            cursor: 'pointer', userSelect: 'none',
+          }}>
+            <input type="checkbox" checked={verbose} onChange={e => toggleVerbose(e.target.checked)} />
+            <span style={{ fontWeight: 600, fontSize: 13 }}>详细记录</span>
+          </label>
+
+          <button
+            type="button"
+            onClick={() => setShowConfig(prev => !prev)}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6,
+              padding: '6px 12px', fontSize: 13,
+              background: showConfig ? 'var(--bg-hover)' : 'var(--bg-input)',
+              border: '1px solid var(--border)',
+              borderRadius: 6, cursor: 'pointer',
+            }}
+          >
+            <span>⚙️ 高级配置</span>
+            <span style={{ fontSize: 11, color: 'var(--text-3)' }}>{showConfig ? '▲ 收起' : '▼ 展开'}</span>
+          </button>
+
+          <span style={{ fontSize: 12, color: 'var(--warn-fg)', display: 'flex', alignItems: 'center', gap: 4 }}>
+            ⚠ 完整记录报文含明文 API 密钥，仅限本地使用，切勿暴露公网
+          </span>
+          {settingsErr && !showConfig && <span style={{ fontSize: 12, color: 'var(--err-fg)' }}>{settingsErr}</span>}
+          {settingsMsg && !showConfig && <span style={{ fontSize: 12, color: 'var(--ok-fg)' }}>{settingsMsg}</span>}
+        </div>
+
+        {/* Advanced settings drawer */}
+        {showConfig && (
+          <div style={{
+            marginTop: 12,
+            padding: 16,
+            background: 'var(--bg-panel)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+            maxWidth: 760,
+          }}>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12, color: 'var(--text-1)' }}>
+              详细请求日志存储配置
+            </div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: 14 }}>
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-2)', marginBottom: 4 }}>
+                  存储路径 (Log Directory)
+                </label>
+                <input
+                  type="text"
+                  value={dir}
+                  onChange={e => setDir(e.target.value)}
+                  placeholder="logs"
+                  style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                />
+                <span style={{ fontSize: 11, color: 'var(--text-3)' }}>相对或绝对路径，默认 logs</span>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-2)', marginBottom: 4 }}>
+                  单个文件大小 (MB)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={2048}
+                  value={maxFileSizeMB}
+                  onChange={e => setMaxFileSizeMB(Number(e.target.value))}
+                  style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                />
+                <span style={{ fontSize: 11, color: 'var(--text-3)' }}>超过后自动切片轮转 (默认 20MB)</span>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-2)', marginBottom: 4 }}>
+                  保留文件数量 (Max Backups)
+                </label>
+                <input
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={maxBackups}
+                  onChange={e => setMaxBackups(Number(e.target.value))}
+                  style={{ width: '100%', fontFamily: 'var(--font-mono)', fontSize: 12 }}
+                />
+                <span style={{ fontSize: 11, color: 'var(--text-3)' }}>超出上限的最旧切片自动删除 (默认 10)</span>
+              </div>
+
+              <div>
+                <label style={{ display: 'block', fontSize: 12, color: 'var(--text-2)', marginBottom: 4 }}>
+                  压缩等级 (zstd Level)
+                </label>
+                <select
+                  value={compressionLevel}
+                  onChange={e => setCompressionLevel(e.target.value)}
+                  style={{ width: '100%', fontSize: 12 }}
+                >
+                  <option value="fastest">fastest（极速，CPU占用最低）</option>
+                  <option value="default">default（标准平衡）</option>
+                  <option value="better">better（高压缩比）</option>
+                  <option value="best">best（极致压缩，推荐，默认）</option>
+                </select>
+                <span style={{ fontSize: 11, color: 'var(--text-3)' }}>基于前序请求字典链压缩，节省磁盘</span>
+              </div>
+            </div>
+
+            <div style={{ marginTop: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={saveAdvancedConfig}
+                disabled={savingConfig}
+                style={{ fontSize: 12, padding: '6px 16px' }}
+              >
+                {savingConfig ? '正在保存...' : '保存配置'}
+              </button>
+              {settingsErr && <span style={{ fontSize: 12, color: 'var(--err-fg)' }}>{settingsErr}</span>}
+              {settingsMsg && <span style={{ fontSize: 12, color: 'var(--ok-fg)' }}>{settingsMsg}</span>}
+            </div>
+          </div>
+        )}
       </div>
 
       {err && <div className="alert err">{err}</div>}

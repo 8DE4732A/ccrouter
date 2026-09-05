@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"os"
 	"testing"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 func TestEncodeDecodeChunkRoundtrip(t *testing.T) {
 	raw := []byte(`{"a":1}` + "\n" + `{"a":2}` + "\n")
-	chunk, err := encodeChunk(raw, 2, 100, 200, nil, true)
+	chunk, err := encodeChunk(raw, 2, 100, 200, nil, true, zstd.SpeedBestCompression)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,17 +42,17 @@ func TestChunkDictionaryChainReducesSize(t *testing.T) {
 	rec1 := append(append([]byte{}, base...), []byte("delta-1\n")...)
 	rec2 := append(append([]byte{}, base...), []byte("delta-1\ndelta-2\n")...)
 
-	chunk1, err := encodeChunk(rec1, 1, 1, 1, nil, true)
+	chunk1, err := encodeChunk(rec1, 1, 1, 1, nil, true, zstd.SpeedBestCompression)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// chunk2 chained off chunk1's raw content.
-	chunk2Chained, err := encodeChunk(rec2, 1, 2, 2, rec1, false)
+	chunk2Chained, err := encodeChunk(rec2, 1, 2, 2, rec1, false, zstd.SpeedBestCompression)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// chunk2 with no dictionary, for comparison.
-	chunk2Standalone, err := encodeChunk(rec2, 1, 2, 2, nil, true)
+	chunk2Standalone, err := encodeChunk(rec2, 1, 2, 2, nil, true, zstd.SpeedBestCompression)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +87,7 @@ func TestDecodeChunkWithWrongDictFails(t *testing.T) {
 	// touch the dictionary, which would make this test vacuous).
 	dict := bytes.Repeat([]byte("the quick brown fox jumps over the lazy dog. "), 2000)
 	raw := append(append([]byte{}, dict...), []byte("delta\n")...)
-	chunk, err := encodeChunk(raw, 1, 1, 1, dict, false)
+	chunk, err := encodeChunk(raw, 1, 1, 1, dict, false, zstd.SpeedBestCompression)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,9 +132,9 @@ func TestScanChunkIndexToleratesTruncatedTrailingChunk(t *testing.T) {
 	path := dir + "/segment"
 
 	raw1 := []byte(`{"a":1}` + "\n")
-	chunk1, _ := encodeChunk(raw1, 1, 1, 1, nil, true)
+	chunk1, _ := encodeChunk(raw1, 1, 1, 1, nil, true, zstd.SpeedBestCompression)
 	raw2 := []byte(`{"a":2}` + "\n")
-	chunk2, _ := encodeChunk(raw2, 1, 2, 2, raw1, false)
+	chunk2, _ := encodeChunk(raw2, 1, 2, 2, raw1, false, zstd.SpeedBestCompression)
 
 	// Simulate a crash mid-write: chunk1 fully written, chunk2 truncated.
 	var buf bytes.Buffer

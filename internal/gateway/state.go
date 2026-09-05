@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -170,6 +171,17 @@ func (s *State) ConfigPath() string { return s.configPath }
 func (s *State) Reload(newConfig *config.AppConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.report != nil {
+		logDir := config.ResolveLogDir(s.configPath, newConfig.Logging.Dir)
+		if err := s.report.Reconfigure(report.Options{
+			Dir:              logDir,
+			MaxBytes:         int64(newConfig.Logging.MaxFileSizeMB) * 1024 * 1024,
+			BackupCount:      newConfig.Logging.MaxBackups,
+			CompressionLevel: newConfig.Logging.CompressionLevel,
+		}); err != nil {
+			return fmt.Errorf("reconfigure report logger failed: %w", err)
+		}
+	}
 	prev := s.service.KeyManagers
 	newSvc, err := buildService(newConfig, prev, s.recorder, s.report)
 	if err != nil {

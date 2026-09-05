@@ -87,7 +87,7 @@ SENSE_ROLL_CONFIG=/etc/ccrouter/config.yaml ./ccrouter
 | **请求** | 分页日志，含 combo / provider / model / key / 状态码 / token 用量 / matched_payload |
 | **配置** | 编辑 Provider 和 Combo，保存后热重载，无需重启 |
 | **测试** | 直接调用代理端点验证配置，支持流式展示、thinking 模式和图像生成 |
-| **日志** | 详细请求报文（需开启 verbose_logging），可展开查看完整 client/upstream 请求与响应 |
+| **日志** | 详细请求报文（需开启详细记录），可展开查看完整 client/upstream 请求与响应，支持配置存储路径、单文件大小、备份数与压缩等级 |
 | **信息** | 版本、Go 运行时、当前 Provider 和 Combo 列表 |
 
 ## 配置说明
@@ -107,7 +107,12 @@ general:          # 可选；全局设置
   admin_password: "..."   # 管理控制台访问密码（留空则不开启认证）
   request_timeout_seconds: 600 # 上游请求超时时间（秒）
 
-verbose_logging: false  # 可选；true 时在 cwd/logs/ 记录完整请求报文（含明文密钥）
+logging:          # 可选；详细请求报文记录与存储配置
+  enabled: false          # 是否启用（也可使用 verbose_logging: false）
+  dir: "logs"             # 存储目录（相对或绝对路径，默认 logs）
+  max_file_size_mb: 20    # 单文件大小上限 (MB)，超出自动切片（默认 20）
+  max_backups: 10         # 历史切片文件保留数上限（默认 10）
+  compression_level: best # zstd 压缩等级：fastest | default | better | best（默认 best）
 
 payload_scripts:        # 可选；转发前按顺序执行的改写脚本
   - name: "..."
@@ -263,8 +268,8 @@ payload_scripts:
 | `GET /admin/api/stats/trend` | 时间分桶趋势（minute / hour / day） |
 | `GET /admin/api/requests` | 分页请求明细 |
 | `GET /admin/api/stats/keys` | 实时密钥池状态（同 `/keys/status`） |
-| `GET /admin/api/logs` | 详细日志（需开启 verbose_logging） |
-| `GET/PUT /admin/api/logs/settings` | 查看/切换 verbose_logging |
+| `GET /admin/api/logs` | 详细日志（需开启详细记录） |
+| `GET/PUT /admin/api/logs/settings` | 查看/更新详细日志及存储配置 |
 | `GET /admin/api/info` | 版本、运行时、combo 和 provider 列表 |
 | `GET /admin/api/health` | 进程健康（含 DB 队列状态） |
 

@@ -289,10 +289,54 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 		}
 	}
 
-	// ---- verbose_logging ----
-	if v, ok := raw["verbose_logging"]; ok {
-		cfg.VerboseLogging = toBool(v)
+	// ---- logging / verbose_logging ----
+	cfg.Logging = LoggingConfig{
+		Dir:              "logs",
+		MaxFileSizeMB:    20,
+		MaxBackups:       10,
+		CompressionLevel: "best",
 	}
+
+	if logRaw, ok := raw["logging"].(map[string]any); ok {
+		if v, ok := logRaw["enabled"]; ok {
+			cfg.Logging.Enabled = toBool(v)
+		}
+		if d := strings.TrimSpace(strVal(logRaw["dir"])); d != "" {
+			cfg.Logging.Dir = d
+		}
+		if sz, ok := logRaw["max_file_size_mb"]; ok {
+			s := intDefault(sz, 0)
+			if s <= 0 {
+				return nil, errf("logging.max_file_size_mb must be > 0")
+			}
+			cfg.Logging.MaxFileSizeMB = s
+		}
+		if bk, ok := logRaw["max_backups"]; ok {
+			b := intDefault(bk, 0)
+			if b <= 0 {
+				return nil, errf("logging.max_backups must be > 0")
+			}
+			cfg.Logging.MaxBackups = b
+		}
+		if lvlRaw, ok := logRaw["compression_level"]; ok {
+			lvl := strings.ToLower(strings.TrimSpace(strVal(lvlRaw)))
+			if lvl != "fastest" && lvl != "default" && lvl != "better" && lvl != "best" {
+				return nil, errf("logging.compression_level must be one of: fastest, default, better, best")
+			}
+			cfg.Logging.CompressionLevel = lvl
+		}
+	}
+
+	if v, ok := raw["verbose_logging"]; ok {
+		var hasLoggingEnabled bool
+		if lm, ok := raw["logging"].(map[string]any); ok {
+			_, hasLoggingEnabled = lm["enabled"]
+		}
+		if !hasLoggingEnabled {
+			cfg.Logging.Enabled = toBool(v)
+		}
+	}
+	cfg.VerboseLogging = cfg.Logging.Enabled
 
 	// ---- payload_scripts ----
 	if v, ok := raw["payload_scripts"]; ok {

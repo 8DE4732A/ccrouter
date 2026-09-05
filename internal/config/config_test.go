@@ -379,7 +379,179 @@ func TestVerboseLoggingDefaultFalse(t *testing.T) {
 	if cfg.VerboseLogging {
 		t.Fatal("expected verbose_logging false by default")
 	}
+	if cfg.Logging.Enabled {
+		t.Fatal("expected logging.enabled false by default")
+	}
+	if cfg.Logging.Dir != "logs" || cfg.Logging.MaxFileSizeMB != 20 || cfg.Logging.MaxBackups != 10 || cfg.Logging.CompressionLevel != "best" {
+		t.Fatalf("unexpected logging defaults: %+v", cfg.Logging)
+	}
 }
+
+func TestLoggingConfigLegacyVerboseLogging(t *testing.T) {
+	const raw = `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+    health_check_rules: []
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+verbose_logging: true
+`
+	cfg := loadFromText(t, raw)
+	if !cfg.VerboseLogging || !cfg.Logging.Enabled {
+		t.Fatalf("expected both VerboseLogging and Logging.Enabled to be true, got %v / %v", cfg.VerboseLogging, cfg.Logging.Enabled)
+	}
+}
+
+func TestLoggingConfigFull(t *testing.T) {
+	const raw = `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+    health_check_rules: []
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+logging:
+  enabled: true
+  dir: "/var/log/ccrouter"
+  max_file_size_mb: 50
+  max_backups: 20
+  compression_level: "better"
+`
+	cfg := loadFromText(t, raw)
+	if !cfg.Logging.Enabled || !cfg.VerboseLogging {
+		t.Fatal("expected logging enabled")
+	}
+	if cfg.Logging.Dir != "/var/log/ccrouter" {
+		t.Fatalf("unexpected dir: %s", cfg.Logging.Dir)
+	}
+	if cfg.Logging.MaxFileSizeMB != 50 {
+		t.Fatalf("unexpected max_file_size_mb: %d", cfg.Logging.MaxFileSizeMB)
+	}
+	if cfg.Logging.MaxBackups != 20 {
+		t.Fatalf("unexpected max_backups: %d", cfg.Logging.MaxBackups)
+	}
+	if cfg.Logging.CompressionLevel != "better" {
+		t.Fatalf("unexpected compression_level: %s", cfg.Logging.CompressionLevel)
+	}
+
+	d := Dump(cfg)
+	rebuilt, err := Build(d)
+	if err != nil {
+		t.Fatalf("rebuild failed: %v", err)
+	}
+	if rebuilt.Logging.Dir != "/var/log/ccrouter" || rebuilt.Logging.MaxFileSizeMB != 50 || rebuilt.Logging.MaxBackups != 20 || rebuilt.Logging.CompressionLevel != "better" || !rebuilt.Logging.Enabled {
+		t.Fatalf("roundtrip mismatch: %+v", rebuilt.Logging)
+	}
+}
+
+func TestLoggingConfigValidation(t *testing.T) {
+	mustReject(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+logging:
+  max_file_size_mb: 0
+`)
+
+	mustReject(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+logging:
+  max_backups: -1
+`)
+
+	mustReject(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+logging:
+  compression_level: "invalid_level"
+`)
+}
+
+func TestResolveLogDir(t *testing.T) {
+	// Absolute path
+	if got := ResolveLogDir("/a/b/config.yaml", "/var/log/ccrouter"); got != "/var/log/ccrouter" {
+		t.Fatalf("expected /var/log/ccrouter, got %s", got)
+	}
+
+	// Relative path with configPath
+	if got := ResolveLogDir("/a/b/config.yaml", "logs"); got != "/a/b/logs" {
+		t.Fatalf("expected /a/b/logs, got %s", got)
+	}
+
+	// Empty dir defaults to logs
+	if got := ResolveLogDir("/a/b/config.yaml", ""); got != "/a/b/logs" {
+		t.Fatalf("expected /a/b/logs for empty dir, got %s", got)
+	}
+}
+
+func TestTestDirWritable(t *testing.T) {
+	dir := t.TempDir()
+	validDir := filepath.Join(dir, "sub", "logdir")
+	if err := TestDirWritable(validDir); err != nil {
+		t.Fatalf("expected valid dir to be writable, got: %v", err)
+	}
+
+	// Create a regular file, and try to use it as a directory -> should fail
+	filePath := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(filePath, []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	invalidDir := filepath.Join(filePath, "cannot_create_inside_file")
+	if err := TestDirWritable(invalidDir); err == nil {
+		t.Fatal("expected error when trying to create dir inside a file, got nil")
+	}
+}
+
 
 // TestRequestTimeoutHoursRoundtrip verifies the request_timeout_seconds field is
 // parsed, validated, and round-tripped through Dump/Build.

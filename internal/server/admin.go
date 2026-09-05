@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"runtime"
@@ -48,6 +49,13 @@ func putConfig(c *gin.Context) {
 		return
 	}
 	st := stateOf(c)
+	if newConfig.Logging.Dir != "" {
+		targetDir := config.ResolveLogDir(st.ConfigPath(), newConfig.Logging.Dir)
+		if err := config.TestDirWritable(targetDir); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("log directory %q is not writable: %v", newConfig.Logging.Dir, err)})
+			return
+		}
+	}
 	if err := st.SaveAndReload(newConfig); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload failed: " + err.Error()})
 		return

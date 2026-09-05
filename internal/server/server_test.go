@@ -645,3 +645,141 @@ payload_scripts: []
 	}
 }
 
+func TestAdminLogSettings(t *testing.T) {
+	st, _ := newTestState(t)
+	r := Router(st)
+
+	// Initial GET
+	rec := doGET(t, r, "/admin/api/logs/settings")
+	if rec.Code != 200 {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &settings); err != nil {
+		t.Fatal(err)
+	}
+	if settings["verbose_logging"] != false || settings["enabled"] != false {
+		t.Fatalf("expected verbose_logging=false and enabled=false, got %#v", settings)
+	}
+	if settings["max_file_size_mb"].(float64) != 20 {
+		t.Fatalf("expected max_file_size_mb=20, got %v", settings["max_file_size_mb"])
+	}
+	if settings["max_backups"].(float64) != 10 {
+		t.Fatalf("expected max_backups=10, got %v", settings["max_backups"])
+	}
+	if settings["compression_level"] != "best" {
+		t.Fatalf("expected compression_level=best, got %v", settings["compression_level"])
+	}
+
+	// Legacy PUT {"enabled": true}
+	rec = doJSON(t, r, "PUT", "/admin/api/logs/settings", map[string]any{"enabled": true})
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 for legacy put, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var putResp map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &putResp)
+	if putResp["verbose_logging"] != true || putResp["enabled"] != true {
+		t.Fatalf("expected verbose_logging=true and enabled=true, got %#v", putResp)
+	}
+
+	// Full PUT
+	customDir := t.TempDir() + "/custom_logs"
+	rec = doJSON(t, r, "PUT", "/admin/api/logs/settings", map[string]any{
+		"enabled":           true,
+		"dir":               customDir,
+		"max_file_size_mb":  30,
+		"max_backups":       15,
+		"compression_level": "fastest",
+	})
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 for full put, got %d: %s", rec.Code, rec.Body.String())
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &putResp)
+	if putResp["dir"] != customDir || putResp["max_file_size_mb"].(float64) != 30 ||
+		putResp["max_backups"].(float64) != 15 || putResp["compression_level"] != "fastest" {
+		t.Fatalf("unexpected put response: %#v", putResp)
+	}
+
+	// Validation checks: invalid compression_level
+	rec = doJSON(t, r, "PUT", "/admin/api/logs/settings", map[string]any{"compression_level": "ultra"})
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for invalid compression_level, got %d", rec.Code)
+	}
+
+	// Validation checks: invalid max_file_size_mb
+	rec = doJSON(t, r, "PUT", "/admin/api/logs/settings", map[string]any{"max_file_size_mb": 0})
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for max_file_size_mb=0, got %d", rec.Code)
+	}
+
+	// Validation checks: invalid max_backups
+	rec = doJSON(t, r, "PUT", "/admin/api/logs/settings", map[string]any{"max_backups": 1000})
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for max_backups=1000, got %d", rec.Code)
+	}
+
+	// Validation checks: empty dir
+	rec = doJSON(t, r, "PUT", "/admin/api/logs/settings", map[string]any{"dir": "   "})
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for empty dir, got %d", rec.Code)
+	}
+
+	// Validation checks: unwriteable dir
+	badDir := filepath.Join(t.TempDir(), "dummy_file")
+	if err := os.WriteFile(badDir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	unwriteableDir := filepath.Join(badDir, "sub_dir")
+	rec = doJSON(t, r, "PUT", "/admin/api/logs/settings", map[string]any{"dir": unwriteableDir})
+	if rec.Code != 400 {
+		t.Fatalf("expected 400 for unwriteable dir, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	// Verify config on disk was NOT modified with the bad directory
+	rec = doGET(t, r, "/admin/api/logs/settings")
+	_ = json.Unmarshal(rec.Body.Bytes(), &settings)
+	if settings["dir"] == unwriteableDir {
+		t.Fatal("unwriteable directory leaked into saved configuration!")
+	}
+
+	// PUT /admin/api/config with unwriteable logging.dir
+	cfgResp := doJSON(t, r, "PUT", "/admin/api/config", map[string]any{
+		"providers": []map[string]any{
+			{
+				"name": "sn",
+				"api":  []map[string]any{{"api_format": "openai", "base_url": "http://127.0.0.1:1/v1"}},
+				"keys": []map[string]any{{"key": "sk-1"}},
+			},
+		},
+		"combos": []map[string]any{
+			{"name": "c", "api_format": "openai", "strategy": "fill-first", "members": []map[string]any{{"provider": "sn", "model": "m"}}},
+		},
+		"logging": map[string]any{
+			"dir": unwriteableDir,
+		},
+	})
+	if cfgResp.Code != 400 {
+		t.Fatalf("expected 400 when setting unwriteable dir via PUT /config, got %d: %s", cfgResp.Code, cfgResp.Body.String())
+	}
+}
+
+func TestAdminLogsNilReport(t *testing.T) {
+	st, _ := newTestState(t)
+	// Create state without report logger
+	stNil, err := gateway.New(st.Service().Config, st.ConfigPath(), st.Recorder(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := Router(stNil)
+
+	rec := doGET(t, r, "/admin/api/logs")
+	if rec.Code != 200 {
+		t.Fatalf("expected 200 for nil report logger, got %d", rec.Code)
+	}
+
+	rec = doGET(t, r, "/admin/api/logs/detail/123.456")
+	if rec.Code != 404 {
+		t.Fatalf("expected 404 for nil report logger detail, got %d", rec.Code)
+	}
+}
+

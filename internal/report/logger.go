@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/klauspost/compress/zstd"
 )
 
 const (
@@ -24,6 +26,14 @@ const (
 	batchMaxWait    = 2 * time.Second
 )
 
+// Options configures the Logger.
+type Options struct {
+	Dir              string
+	MaxBytes         int64
+	BackupCount      int
+	CompressionLevel string
+}
+
 // Logger writes detailed request records as JSONL, compressed with chained
 // zstd dictionaries and rotated by size. Records include full upstream
 // headers, which may contain plaintext API keys — the underlying files
@@ -32,10 +42,12 @@ const (
 // See format.go for the on-disk chunk format, the dictionary-chaining
 // strategy, and the reasoning behind the chosen compression level.
 type Logger struct {
-	logDir      string
-	maxBytes    int64
-	backupCount int
-	active      string
+	writeMu          sync.Mutex // serializes chunk writes, rotations, and reconfiguration
+	logDir           string
+	maxBytes         int64
+	backupCount      int
+	compressionLevel zstd.EncoderLevel
+	active           string
 
 	fh                    *os.File
 	fileSize              int64  // current size of the active segment file
@@ -51,12 +63,26 @@ type Logger struct {
 	written int
 }
 
-// New creates a Logger writing to logDir/requests.zrc.
-func New(logDir string) (*Logger, error) {
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
+// NewWithOptions creates a Logger with custom Options.
+func NewWithOptions(opts Options) (*Logger, error) {
+	dir := opts.Dir
+	if dir == "" {
+		dir = "logs"
+	}
+	maxBytes := opts.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxBytes
+	}
+	backupCount := opts.BackupCount
+	if backupCount <= 0 {
+		backupCount = defaultBackupCnt
+	}
+	level := ParseCompressionLevel(opts.CompressionLevel)
+
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
-	active := filepath.Join(logDir, segmentFilename)
+	active := filepath.Join(dir, segmentFilename)
 	fh, err := os.OpenFile(active, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, err
@@ -67,18 +93,24 @@ func New(logDir string) (*Logger, error) {
 		return nil, err
 	}
 	l := &Logger{
-		logDir:      logDir,
-		maxBytes:    defaultMaxBytes,
-		backupCount: defaultBackupCnt,
-		active:      active,
-		fh:          fh,
-		fileSize:    st.Size(),
-		records:     make(chan map[string]any, 10000),
-		done:        make(chan struct{}),
+		logDir:           dir,
+		maxBytes:         maxBytes,
+		backupCount:      backupCount,
+		compressionLevel: level,
+		active:           active,
+		fh:               fh,
+		fileSize:         st.Size(),
+		records:          make(chan map[string]any, 10000),
+		done:             make(chan struct{}),
 	}
 	l.wg.Add(1)
 	go l.run()
 	return l, nil
+}
+
+// New creates a Logger writing to logDir/requests.zrc with default settings.
+func New(logDir string) (*Logger, error) {
+	return NewWithOptions(Options{Dir: logDir})
 }
 
 // run is the background writer goroutine. It batches records into chunks of
@@ -139,6 +171,9 @@ func (l *Logger) run() {
 // writeBatch compresses and appends one chunk containing all of batch's
 // records, then rotates the segment if it has grown past maxBytes.
 func (l *Logger) writeBatch(batch []map[string]any) {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+
 	var raw []byte
 	firstTS, lastTS := 0.0, 0.0
 	n := 0
@@ -165,7 +200,7 @@ func (l *Logger) writeBatch(batch []map[string]any) {
 	}
 
 	checkpoint := l.prevRaw == nil || l.chunksSinceCheckpoint >= checkpointInterval
-	chunk, err := encodeChunk(raw, n, firstTS, lastTS, l.prevRaw, checkpoint)
+	chunk, err := encodeChunk(raw, n, firstTS, lastTS, l.prevRaw, checkpoint, l.compressionLevel)
 	if err != nil {
 		l.mu.Lock()
 		l.written += len(batch)
@@ -239,6 +274,70 @@ func (l *Logger) rotate() {
 	l.chunksSinceCheckpoint = 0
 }
 
+// Reconfigure updates logger settings dynamically at runtime.
+func (l *Logger) Reconfigure(opts Options) error {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+
+	if opts.MaxBytes > 0 {
+		l.maxBytes = opts.MaxBytes
+	}
+	if opts.BackupCount > 0 {
+		l.backupCount = opts.BackupCount
+	}
+	if opts.CompressionLevel != "" {
+		l.compressionLevel = ParseCompressionLevel(opts.CompressionLevel)
+	}
+	if opts.Dir != "" && opts.Dir != l.logDir {
+		if l.fh != nil {
+			_ = l.fh.Sync()
+			_ = l.fh.Close()
+		}
+		if err := os.MkdirAll(opts.Dir, 0o755); err != nil {
+			oldFh, _ := os.OpenFile(l.active, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			l.fh = oldFh
+			return err
+		}
+		newActive := filepath.Join(opts.Dir, segmentFilename)
+		newFh, err := os.OpenFile(newActive, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			oldFh, _ := os.OpenFile(l.active, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			l.fh = oldFh
+			return err
+		}
+		st, err := newFh.Stat()
+		if err != nil {
+			newFh.Close()
+			oldFh, _ := os.OpenFile(l.active, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+			l.fh = oldFh
+			return err
+		}
+		l.logDir = opts.Dir
+		l.active = newActive
+		l.fh = newFh
+		l.fileSize = st.Size()
+		l.prevRaw = nil
+		l.chunksSinceCheckpoint = 0
+	}
+
+	if l.fileSize >= l.maxBytes {
+		l.rotate()
+	}
+	return nil
+}
+
+// Settings returns the current Logger options.
+func (l *Logger) Settings() Options {
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+	return Options{
+		Dir:              l.logDir,
+		MaxBytes:         l.maxBytes,
+		BackupCount:      l.backupCount,
+		CompressionLevel: CompressionLevelToString(l.compressionLevel),
+	}
+}
+
 // Log enqueues a record for writing (non-blocking).
 func (l *Logger) Log(rec map[string]any) {
 	select {
@@ -281,5 +380,9 @@ func (l *Logger) DroppedCount() int {
 func (l *Logger) Close() {
 	close(l.done)
 	l.wg.Wait()
-	_ = l.fh.Close()
+	l.writeMu.Lock()
+	defer l.writeMu.Unlock()
+	if l.fh != nil {
+		_ = l.fh.Close()
+	}
 }

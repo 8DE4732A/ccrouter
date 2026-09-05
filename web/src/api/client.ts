@@ -135,8 +135,18 @@ export type PayloadScript = {
   script: string
 }
 
+export type LoggingConfig = {
+  enabled?: boolean
+  dir?: string
+  max_file_size_mb?: number
+  max_backups?: number
+  compression_level?: 'fastest' | 'default' | 'better' | 'best' | string
+}
+
 export type AppConfig = {
   general?: GeneralConfig
+  logging?: LoggingConfig
+  verbose_logging?: boolean
   providers: ProviderConfig[]
   combos: ComboConfig[]
   payload_scripts?: PayloadScript[]
@@ -322,7 +332,23 @@ export type LogRecord = LogRow & {
 }
 
 export type LogsResp = { items: LogRow[]; has_more: boolean }
-export type LogSettings = { verbose_logging: boolean }
+export type LogSettings = {
+  verbose_logging: boolean
+  enabled?: boolean
+  dir?: string
+  max_file_size_mb?: number
+  max_backups?: number
+  compression_level?: string
+}
+
+export type PutLogSettingsPayload = {
+  enabled?: boolean
+  verbose_logging?: boolean
+  dir?: string
+  max_file_size_mb?: number
+  max_backups?: number
+  compression_level?: string
+}
 
 export const getLogs = (params: { limit?: number; offset?: number; success?: boolean }) => {
   const qs = new URLSearchParams()
@@ -331,8 +357,10 @@ export const getLogs = (params: { limit?: number; offset?: number; success?: boo
 }
 export const getLogDetail = (ts: number) => request<LogRecord>(`/logs/detail/${ts}`)
 export const getLogSettings = () => request<LogSettings>('/logs/settings')
-export const putLogSettings = (enabled: boolean) =>
-  request<LogSettings>('/logs/settings', { method: 'PUT', body: JSON.stringify({ enabled }) })
+export const putLogSettings = (payload: boolean | PutLogSettingsPayload) => {
+  const body = typeof payload === 'boolean' ? { enabled: payload } : payload
+  return request<LogSettings>('/logs/settings', { method: 'PUT', body: JSON.stringify(body) })
+}
 
 // ---- Auth ----
 export type AuthStatus = {

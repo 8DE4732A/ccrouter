@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { getConfig, putConfig, FMT_ENDPOINT, FMT_COLOR, normalizeFormats } from '../api/client'
 import type {
   AppConfig, ProviderConfig, ComboConfig, HealthCheckRule, ComboMember, ApiEndpoint, ApiFormat,
-  PayloadScript, GeneralConfig, ProxyConfig,
+  PayloadScript, GeneralConfig, ProxyConfig, LoggingConfig,
 } from '../api/client'
 
 // Client-facing formats (proxy routes exist for these).
@@ -608,10 +608,14 @@ function ComboDetail({
 // ── General settings panel ───────────────────────────────────────
 function GeneralPanel({
   general,
+  logging,
   onUpdate,
+  onUpdateLogging,
 }: {
   general: GeneralConfig
+  logging: LoggingConfig
   onUpdate: (patch: Partial<GeneralConfig>) => void
+  onUpdateLogging: (patch: Partial<LoggingConfig>) => void
 }) {
   const [revealedKeys, setRevealedKeys] = useState<Set<number>>(new Set())
   const [revealAdminPw, setRevealAdminPw] = useState(false)
@@ -779,6 +783,82 @@ function GeneralPanel({
             }}
             style={{ maxWidth: 120 }}
           />
+        </FieldRow>
+      </div>
+
+      {/* Verbose Logging & Storage */}
+      <div>
+        <SectionLabel>详细请求日志与存储配置</SectionLabel>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+          记录包含完整请求体与响应体的详细日志，使用 zstd 字典链压缩存储于本地磁盘（requests.zrc）。
+          <span style={{ color: 'var(--warn-fg)', marginLeft: 6 }}>
+            ⚠ 报文含明文 API 密钥，仅限本地或受保护环境使用。
+          </span>
+        </div>
+
+        <FieldRow label="详细记录" hint="是否启用请求报文全量落盘记录">
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={logging.enabled ?? false}
+              onChange={e => onUpdateLogging({ enabled: e.target.checked })}
+            />
+            <span style={{ fontSize: 13, fontWeight: 500 }}>
+              {logging.enabled ? '已启用详细记录' : '未启用详细记录'}
+            </span>
+          </label>
+        </FieldRow>
+
+        <FieldRow label="存储路径 (Dir)" hint="日志切片文件存放目录，默认 logs">
+          <input
+            value={logging.dir ?? ''}
+            placeholder="logs"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 300 }}
+            onChange={e => onUpdateLogging({ dir: e.target.value.trim() || undefined })}
+          />
+        </FieldRow>
+
+        <FieldRow label="单文件上限 (MB)" hint="单个切片文件大小上限，达到后自动轮转，默认 20MB">
+          <input
+            type="number"
+            min={1}
+            max={2048}
+            value={logging.max_file_size_mb ?? ''}
+            placeholder="20"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 120 }}
+            onChange={e => {
+              const val = parseInt(e.target.value, 10)
+              onUpdateLogging({ max_file_size_mb: isNaN(val) ? undefined : val })
+            }}
+          />
+        </FieldRow>
+
+        <FieldRow label="保留文件数 (Backups)" hint="超出上限的最旧切片文件将被删除，默认 10 个">
+          <input
+            type="number"
+            min={1}
+            max={100}
+            value={logging.max_backups ?? ''}
+            placeholder="10"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 120 }}
+            onChange={e => {
+              const val = parseInt(e.target.value, 10)
+              onUpdateLogging({ max_backups: isNaN(val) ? undefined : val })
+            }}
+          />
+        </FieldRow>
+
+        <FieldRow label="压缩等级 (Level)" hint="zstd 压缩等级，默认 best（极致压缩）">
+          <select
+            value={logging.compression_level ?? 'best'}
+            style={{ fontSize: 12, maxWidth: 200 }}
+            onChange={e => onUpdateLogging({ compression_level: e.target.value })}
+          >
+            <option value="fastest">fastest（极速）</option>
+            <option value="default">default（标准）</option>
+            <option value="better">better（高压缩比）</option>
+            <option value="best">best（极致压缩）</option>
+          </select>
         </FieldRow>
       </div>
     </div>
@@ -986,6 +1066,17 @@ export default function ConfigEditor() {
   const updateGeneral = (patch: Partial<GeneralConfig>) =>
     setCfg(c => c ? { ...c, general: { ...(c.general ?? {}), ...patch } } : c)
 
+  const updateLogging = (patch: Partial<LoggingConfig>) =>
+    setCfg(c => {
+      if (!c) return c
+      const logging = { ...(c.logging ?? {}), ...patch }
+      return {
+        ...c,
+        logging,
+        verbose_logging: logging.enabled ?? c.verbose_logging,
+      }
+    })
+
   const updateProvider = (i: number, patch: Partial<ProviderConfig>) =>
     setCfg(c => c ? { ...c, providers: c.providers.map((p, j) => j === i ? { ...p, ...patch } : p) } : c)
   const addProvider = () => {
@@ -1136,7 +1227,9 @@ export default function ConfigEditor() {
           <div style={{ flex: 1, overflowY: 'auto', padding: '24px 32px' }}>
             <GeneralPanel
               general={cfg.general ?? {}}
+              logging={cfg.logging ?? { enabled: cfg.verbose_logging }}
               onUpdate={updateGeneral}
+              onUpdateLogging={updateLogging}
             />
           </div>
         )}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -67,31 +68,48 @@ const (
 // call for that one chunk.
 const dictID = uint32(1)
 
-// encoderLevel is the compression level used for every chunk's zstd frame.
-//
-// SpeedBestCompression is the highest tier klauspost/compress/zstd exposes
-// (a pure-Go implementation; roughly equivalent to the reference C encoder's
-// level ~11). Benchmarked against real ccrouter verbose logs (coding-agent
-// traffic, chained dictionary, 10 records/chunk):
-//
-//	SpeedFastest            ~18ms/chunk   5.4 MB total compressed
-//	SpeedDefault             ~30ms/chunk   2.2 MB
-//	SpeedBetterCompression   ~33ms/chunk   1.6 MB
-//	SpeedBestCompression     ~95ms/chunk   0.7 MB   <- chosen
-//
-// The reference C zstd encoder (not available here; verified separately via
-// the `zstd` CLI/python bindings on the same data) showed that going beyond
-// this point (levels 13+) costs 40-50x more CPU for only ~15% extra
-// compression — a bad trade for a background log writer that shares CPU with
-// request handling. This is intentionally NOT exposed as a user-tunable
-// setting: the level only affects the CPU cost of writing NEW chunks, never
-// whether old data can be read back, so it is safe to change later purely as
-// an internal constant without any migration concerns.
-const encoderLevel = zstd.SpeedBestCompression
+// ParseCompressionLevel converts string representation to zstd.EncoderLevel.
+// Supported: "fastest", "default", "better", "best" (default is best).
+func ParseCompressionLevel(s string) zstd.EncoderLevel {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "fastest":
+		return zstd.SpeedFastest
+	case "default":
+		return zstd.SpeedDefault
+	case "better":
+		return zstd.SpeedBetterCompression
+	case "best":
+		return zstd.SpeedBestCompression
+	default:
+		if ok, lvl := zstd.EncoderLevelFromString(s); ok {
+			return lvl
+		}
+		return zstd.SpeedBestCompression
+	}
+}
 
-func newChunkEncoder(dict []byte) (*zstd.Encoder, error) {
+// CompressionLevelToString converts a zstd.EncoderLevel back to its lowercase string name.
+func CompressionLevelToString(lvl zstd.EncoderLevel) string {
+	switch lvl {
+	case zstd.SpeedFastest:
+		return "fastest"
+	case zstd.SpeedDefault:
+		return "default"
+	case zstd.SpeedBetterCompression:
+		return "better"
+	case zstd.SpeedBestCompression:
+		return "best"
+	default:
+		return "best"
+	}
+}
+
+func newChunkEncoder(dict []byte, level zstd.EncoderLevel) (*zstd.Encoder, error) {
+	if level == 0 {
+		level = zstd.SpeedBestCompression
+	}
 	opts := []zstd.EOption{
-		zstd.WithEncoderLevel(encoderLevel),
+		zstd.WithEncoderLevel(level),
 		// Single-shot EncodeAll on chunk-sized input (a handful of JSON
 		// records): the async multi-goroutine pipeline isn't worth its
 		// overhead here, so pin concurrency to 1.
@@ -121,11 +139,11 @@ func newChunkDecoder(dict []byte) (*zstd.Decoder, error) {
 // encodeChunk compresses raw (concatenated JSONL bytes for recordCount
 // records) into a self-contained on-disk chunk. dict is the previous chunk's
 // raw bytes (nil/empty for a checkpoint chunk).
-func encodeChunk(raw []byte, recordCount int, firstTS, lastTS float64, dict []byte, checkpoint bool) ([]byte, error) {
+func encodeChunk(raw []byte, recordCount int, firstTS, lastTS float64, dict []byte, checkpoint bool, level zstd.EncoderLevel) ([]byte, error) {
 	if checkpoint {
 		dict = nil
 	}
-	enc, err := newChunkEncoder(dict)
+	enc, err := newChunkEncoder(dict, level)
 	if err != nil {
 		return nil, err
 	}

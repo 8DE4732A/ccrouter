@@ -20,8 +20,11 @@ combos:              # list，至少一个 ComboGroup 或 ComboConfig
 general:             [GeneralConfig, default={}]
                      # 全局设置，包括客户端 API Key 认证、全局出站代理、请求超时以及管理控制台认证
 
+logging:             [LoggingConfig, default={dir: "logs", max_file_size_mb: 20, max_backups: 10, compression_level: "best"}]
+                     # 详细请求日志与存储配置（切片轮转、zstd 字典链压缩）
+
 verbose_logging:     [bool, default=false]
-                     # 是否将完整请求报文写入 cwd/logs/requests.jsonl
+                     # 兼容别名，等价于 logging.enabled
                      # 含请求 body、响应 body、headers（含密钥明文），仅限私有网络使用
 
 payload_scripts:     [list[PayloadScript], default=[]]
@@ -225,6 +228,25 @@ GeneralConfig:
                            # 管理控制台（Web UI 及 /admin/api/*）登录密码；若未配置或为空则无需认证
 
 # ===========================================================================
+# LoggingConfig
+# ===========================================================================
+# 详细请求报文记录及存储轮转配置。
+# 使用 zstd 字典链压缩存储，支持多级切片轮转。
+# 记录包含完整请求体、响应体与 headers（含明文 API 密钥），仅限私有受信网络使用。
+
+LoggingConfig:
+  enabled:                 [bool, default=false]
+                           # 是否启用全量请求报文记录（等价于 verbose_logging）
+  dir:                     [string, default="logs"]
+                           # 日志文件存放目录（相对或绝对路径）
+  max_file_size_mb:        [int, default=20]
+                           # 单个切片文件最大大小 (MB)，超出后自动切片轮转
+  max_backups:             [int, default=10]
+                           # 历史切片保留文件数量上限，超出后最早切片自动删除
+  compression_level:       [string, default="best"]
+                           # zstd 压缩等级：fastest | default | better | best
+
+# ===========================================================================
 # 端点 → api_format 对应表（客户端）
 # ===========================================================================
 #
@@ -249,6 +271,6 @@ GeneralConfig:
 # GET  /admin/api/requests         请求明细列表
 # GET  /admin/api/info             运行时信息（版本、combo/provider 列表）
 # GET  /admin/api/health           服务健康状态
-# GET  /admin/api/logs             详细请求报文（需开启 verbose_logging）
-# GET  /admin/api/logs/settings    查看/切换 verbose_logging
-
+# GET  /admin/api/logs             详细请求报文（需开启 logging.enabled 或 verbose_logging）
+# GET  /admin/api/logs/settings    查看详细日志配置
+# PUT  /admin/api/logs/settings    动态切换详细记录及配置存储参数

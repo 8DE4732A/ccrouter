@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 )
@@ -291,11 +293,58 @@ type PayloadScript struct {
 	Script  string `json:"script" yaml:"script"`
 }
 
+type LoggingConfig struct {
+	Enabled          bool   `json:"enabled" yaml:"enabled"`
+	Dir              string `json:"dir,omitempty" yaml:"dir,omitempty"`                           // default "logs"
+	MaxFileSizeMB    int    `json:"max_file_size_mb,omitempty" yaml:"max_file_size_mb,omitempty"` // default 20 (MB)
+	MaxBackups       int    `json:"max_backups,omitempty" yaml:"max_backups,omitempty"`           // default 10
+	CompressionLevel string `json:"compression_level,omitempty" yaml:"compression_level,omitempty"` // fastest, default, better, best (default "best")
+}
+
 type AppConfig struct {
 	General        GeneralConfig    `json:"general,omitempty" yaml:"general,omitempty"`
 	Providers      []ProviderConfig `json:"providers" yaml:"providers"`
 	Combos         []ComboConfig    `json:"combos" yaml:"combos"`
 	VerboseLogging bool             `json:"verbose_logging" yaml:"verbose_logging"`
+	Logging        LoggingConfig    `json:"logging,omitempty" yaml:"logging,omitempty"`
 	PayloadScripts []PayloadScript  `json:"payload_scripts" yaml:"payload_scripts"`
+}
+
+// ResolveLogDir resolves a log directory path. If dir is relative, it is resolved
+// relative to configPath's directory, falling back to current working directory.
+func ResolveLogDir(configPath, dir string) string {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		dir = "logs"
+	}
+	if filepath.IsAbs(dir) {
+		return dir
+	}
+	baseDir := ""
+	if configPath != "" {
+		baseDir = filepath.Dir(configPath)
+	}
+	if baseDir == "" || baseDir == "." {
+		if cwd, err := os.Getwd(); err == nil {
+			baseDir = cwd
+		}
+	}
+	return filepath.Join(baseDir, dir)
+}
+
+// TestDirWritable verifies that a directory can be created and written to by
+// ensuring it exists with os.MkdirAll and attempting to create and delete a temporary file.
+func TestDirWritable(dir string) error {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".ccrouter-write-test-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	_ = f.Close()
+	_ = os.Remove(name)
+	return nil
 }
 

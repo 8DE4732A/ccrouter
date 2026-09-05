@@ -3,6 +3,7 @@ package report
 import (
 	"compress/gzip"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -335,5 +336,130 @@ func TestNewToleratesCrashMidChunkWrite(t *testing.T) {
 	items := res["items"].([]map[string]any)
 	if len(items) != 1 || items[0]["combo"] != "safe" {
 		t.Fatalf("expected the one complete record to survive, got %v", items)
+	}
+}
+
+func TestNewWithOptions(t *testing.T) {
+	dir := t.TempDir()
+	l, err := NewWithOptions(Options{
+		Dir:              dir,
+		MaxBytes:         10 * 1024 * 1024,
+		BackupCount:      5,
+		CompressionLevel: "fastest",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	settings := l.Settings()
+	if settings.Dir != dir {
+		t.Fatalf("expected dir %q, got %q", dir, settings.Dir)
+	}
+	if settings.MaxBytes != 10*1024*1024 {
+		t.Fatalf("expected maxBytes %d, got %d", 10*1024*1024, settings.MaxBytes)
+	}
+	if settings.BackupCount != 5 {
+		t.Fatalf("expected backupCount 5, got %d", settings.BackupCount)
+	}
+	if settings.CompressionLevel != "fastest" {
+		t.Fatalf("expected compressionLevel fastest, got %s", settings.CompressionLevel)
+	}
+
+	l.Log(map[string]any{"ts": 100.0, "text": "hello"})
+	l.Flush()
+
+	res, err := l.Read(10, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := res["items"].([]map[string]any)
+	if len(items) != 1 || items[0]["text"] != "hello" {
+		t.Fatalf("unexpected items: %v", items)
+	}
+}
+
+func TestReconfigureSettingsAndDir(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+
+	l, err := NewWithOptions(Options{
+		Dir:              dir1,
+		MaxBytes:         50 * 1024 * 1024,
+		BackupCount:      3,
+		CompressionLevel: "best",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	l.Log(map[string]any{"ts": 1.0, "msg": "in dir1"})
+	l.Flush()
+
+	// Reconfigure to dir2 and level "better"
+	err = l.Reconfigure(Options{
+		Dir:              dir2,
+		MaxBytes:         25 * 1024 * 1024,
+		BackupCount:      7,
+		CompressionLevel: "better",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	settings := l.Settings()
+	if settings.Dir != dir2 || settings.MaxBytes != 25*1024*1024 || settings.BackupCount != 7 || settings.CompressionLevel != "better" {
+		t.Fatalf("unexpected settings after reconfigure: %+v", settings)
+	}
+
+	// Write to new dir
+	l.Log(map[string]any{"ts": 2.0, "msg": "in dir2"})
+	l.Flush()
+
+	res, err := l.Read(10, 0, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := res["items"].([]map[string]any)
+	if len(items) != 1 || items[0]["msg"] != "in dir2" {
+		t.Fatalf("expected only dir2 items after reconfigure, got: %v", items)
+	}
+}
+
+func TestReconfigureMaxBytesRotate(t *testing.T) {
+	dir := t.TempDir()
+	l, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	for i := 0; i < batchMaxRecords; i++ {
+		l.Log(map[string]any{"ts": float64(i + 1), "data": strings.Repeat("x", 100)})
+	}
+	l.Flush()
+
+	// Before rotation, active file has bytes > 0
+	st, err := os.Stat(l.active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Size() == 0 {
+		t.Fatal("expected non-zero active file size")
+	}
+
+	// Now reconfigure maxBytes to 1 byte, which should trigger rotation
+	err = l.Reconfigure(Options{
+		MaxBytes: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Active should have been rotated to .1
+	archive := filepath.Join(dir, segmentFilename+".1")
+	if _, err := os.Stat(archive); err != nil {
+		t.Fatalf("expected archived segment %s to exist after reconfigure rotation", archive)
 	}
 }

@@ -63,15 +63,23 @@ func main() {
 	}
 	log.Printf("SQLite recorder initialised at %s", dbPath)
 
-	logDir := "logs"
-	if cwd, err := os.Getwd(); err == nil {
-		logDir = cwd + "/logs"
-	}
-	reportLogger, err := report.New(logDir)
+	logDir := config.ResolveLogDir(configPath, cfg.Logging.Dir)
+	reportLogger, err := report.NewWithOptions(report.Options{
+		Dir:              logDir,
+		MaxBytes:         int64(cfg.Logging.MaxFileSizeMB) * 1024 * 1024,
+		BackupCount:      cfg.Logging.MaxBackups,
+		CompressionLevel: cfg.Logging.CompressionLevel,
+	})
 	if err != nil {
-		log.Fatalf("Report logger init failed: %v", err)
+		if cfg.Logging.Enabled {
+			log.Fatalf("Report logger init failed at %s: %v", logDir, err)
+		}
+		log.Printf("WARNING: Report logger init failed at %s (%v), verbose logging is disabled", logDir, err)
+		reportLogger = nil
+	} else {
+		log.Printf("Report logger initialised at %s (verbose_logging=%v, max_size=%dMB, backups=%d, level=%s)",
+			logDir, cfg.VerboseLogging, cfg.Logging.MaxFileSizeMB, cfg.Logging.MaxBackups, cfg.Logging.CompressionLevel)
 	}
-	log.Printf("Report logger initialised at %s (verbose_logging=%v)", logDir, cfg.VerboseLogging)
 
 	st, err := gateway.New(cfg, configPath, recorder, reportLogger)
 	if err != nil {
