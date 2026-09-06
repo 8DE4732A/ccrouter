@@ -37,6 +37,9 @@ func Dump(cfg *AppConfig) map[string]any {
 	if cfg.General.AdminPassword != "" {
 		general["admin_password"] = cfg.General.AdminPassword
 	}
+	if cfg.General.ExternalURL != "" {
+		general["external_url"] = cfg.General.ExternalURL
+	}
 
 	providers := make([]any, 0, len(cfg.Providers))
 	for _, p := range cfg.Providers {
@@ -160,7 +163,6 @@ func Dump(cfg *AppConfig) map[string]any {
 		combos = append(combos, grp)
 	}
 
-
 	scripts := make([]any, 0, len(cfg.PayloadScripts))
 	for _, s := range cfg.PayloadScripts {
 		scripts = append(scripts, map[string]any{
@@ -178,12 +180,131 @@ func Dump(cfg *AppConfig) map[string]any {
 		"compression_level": cfg.Logging.CompressionLevel,
 	}
 
+	mcpProviders := make([]any, 0, len(cfg.McpProviders))
+	for _, p := range cfg.McpProviders {
+		pm := map[string]any{
+			"name":      p.Name,
+			"transport": p.Transport,
+		}
+		if p.TimeoutSeconds > 0 {
+			pm["timeout_seconds"] = p.TimeoutSeconds
+		}
+		if p.AuthMode != "" {
+			pm["auth_mode"] = p.AuthMode
+		}
+		if p.Transport == "stdio" {
+			pm["command"] = p.Command
+			if len(p.Args) > 0 {
+				pm["args"] = p.Args
+			}
+			if len(p.Env) > 0 {
+				pm["env"] = p.Env
+			}
+			if p.WorkingDir != "" {
+				pm["working_dir"] = p.WorkingDir
+			}
+		} else {
+			pm["url"] = p.URL
+			if len(p.Headers) > 0 {
+				pm["headers"] = p.Headers
+			}
+		}
+		if p.Auth != nil {
+			mode := p.Auth.Mode
+			if mode == "" {
+				mode = p.Auth.Type
+			}
+			am := map[string]any{"mode": mode}
+			if p.AuthMode == "isolated" || p.Auth.Isolated {
+				am["isolated"] = true
+			}
+			if mode == "api_key" {
+				am["api_key"] = p.Auth.APIKey
+				if p.Auth.Header != "" {
+					am["header"] = p.Auth.Header
+				}
+			} else if mode == "oauth2" {
+				am["client_id"] = p.Auth.ClientID
+				if p.Auth.ClientSecret != "" {
+					am["client_secret"] = p.Auth.ClientSecret
+				}
+				authURL := p.Auth.AuthURL
+				if authURL == "" {
+					authURL = p.Auth.AuthorizationURL
+				}
+				am["auth_url"] = authURL
+				am["token_url"] = p.Auth.TokenURL
+				if len(p.Auth.Scopes) > 0 {
+					am["scopes"] = p.Auth.Scopes
+				}
+				if p.Auth.RedirectURL != "" {
+					am["redirect_url"] = p.Auth.RedirectURL
+				}
+			}
+			pm["auth"] = am
+		}
+		if p.Proxy != nil {
+			pp := map[string]any{}
+			if p.Proxy.URL != "" {
+				pp["url"] = p.Proxy.URL
+			}
+			if p.Proxy.Disabled {
+				pp["disabled"] = true
+			}
+			if len(pp) > 0 {
+				pm["proxy"] = pp
+			}
+		}
+		mcpProviders = append(mcpProviders, pm)
+	}
+
+	mcpCombos := make([]any, 0, len(cfg.McpCombos))
+	for _, c := range cfg.McpCombos {
+		members := make([]any, 0, len(c.Members))
+		for _, m := range c.Members {
+			mm := map[string]any{
+				"provider": m.Provider,
+			}
+			if m.Prefix != "" {
+				mm["prefix"] = m.Prefix
+			}
+			if len(m.Tools) > 0 {
+				mm["tools"] = m.Tools
+			}
+			if len(m.Resources) > 0 {
+				mm["resources"] = m.Resources
+			}
+			if len(m.Prompts) > 0 {
+				mm["prompts"] = m.Prompts
+			}
+			members = append(members, mm)
+		}
+		cm := map[string]any{
+			"name":           c.Name,
+			"user_id_header": c.UserIDHeader,
+			"members":        members,
+		}
+		if c.OwnedBy != "" {
+			cm["owned_by"] = c.OwnedBy
+		}
+		if c.Description != "" {
+			cm["description"] = c.Description
+		}
+		mcpCombos = append(mcpCombos, cm)
+	}
+
 	out := map[string]any{
 		"providers":       providers,
 		"combos":          combos,
 		"verbose_logging": cfg.VerboseLogging,
 		"logging":         logging,
 		"payload_scripts": scripts,
+	}
+	if len(mcpProviders) > 0 {
+		out["mcp_providers"] = mcpProviders
+	}
+	if len(mcpCombos) > 0 {
+		out["mcp_combos"] = mcpCombos
 	}
 	if len(general) > 0 {
 		out["general"] = general

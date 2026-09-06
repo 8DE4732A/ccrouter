@@ -27,6 +27,24 @@ func stateOf(c *gin.Context) *gateway.State {
 
 // ---- Config ----
 
+func saveAndReloadRaw(c *gin.Context, raw map[string]any) (*config.AppConfig, error) {
+	newConfig, err := config.Build(raw)
+	if err != nil {
+		return nil, err
+	}
+	st := stateOf(c)
+	if newConfig.Logging.Dir != "" {
+		targetDir := config.ResolveLogDir(st.ConfigPath(), newConfig.Logging.Dir)
+		if err := config.TestDirWritable(targetDir); err != nil {
+			return nil, fmt.Errorf("log directory %q is not writable: %w", newConfig.Logging.Dir, err)
+		}
+	}
+	if err := st.SaveAndReload(newConfig); err != nil {
+		return nil, fmt.Errorf("reload failed: %w", err)
+	}
+	return newConfig, nil
+}
+
 func getConfig(c *gin.Context) {
 	svc := stateOf(c).Service()
 	c.JSON(http.StatusOK, config.Dump(svc.Config))
@@ -43,24 +61,177 @@ func putConfig(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
 		return
 	}
-	newConfig, err := config.Build(raw)
+	newConfig, err := saveAndReloadRaw(c, raw)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	st := stateOf(c)
-	if newConfig.Logging.Dir != "" {
-		targetDir := config.ResolveLogDir(st.ConfigPath(), newConfig.Logging.Dir)
-		if err := config.TestDirWritable(targetDir); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("log directory %q is not writable: %v", newConfig.Logging.Dir, err)})
-			return
-		}
+	c.JSON(http.StatusOK, config.Dump(newConfig))
+}
+
+func patchConfig(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
+		return
 	}
-	if err := st.SaveAndReload(newConfig); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "reload failed: " + err.Error()})
+	var patch map[string]any
+	if err := json.Unmarshal(body, &patch); err != nil || patch == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
+		return
+	}
+	st := stateOf(c)
+	currMap := config.Dump(st.Service().Config)
+	for k, v := range patch {
+		currMap[k] = v
+	}
+	newConfig, err := saveAndReloadRaw(c, currMap)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, config.Dump(newConfig))
+}
+
+func getCommonConfig(c *gin.Context) {
+	dumped := config.Dump(stateOf(c).Service().Config)
+	res := gin.H{
+		"general":         dumped["general"],
+		"logging":         dumped["logging"],
+		"verbose_logging": dumped["verbose_logging"],
+		"payload_scripts": dumped["payload_scripts"],
+	}
+	c.JSON(http.StatusOK, res)
+}
+
+func putCommonConfig(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
+		return
+	}
+	var patch map[string]any
+	if err := json.Unmarshal(body, &patch); err != nil || patch == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
+		return
+	}
+	st := stateOf(c)
+	currMap := config.Dump(st.Service().Config)
+	for _, key := range []string{"general", "logging", "verbose_logging", "payload_scripts"} {
+		if v, ok := patch[key]; ok {
+			currMap[key] = v
+		}
+	}
+	newConfig, err := saveAndReloadRaw(c, currMap)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	dumped := config.Dump(newConfig)
+	c.JSON(http.StatusOK, gin.H{
+		"general":         dumped["general"],
+		"logging":         dumped["logging"],
+		"verbose_logging": dumped["verbose_logging"],
+		"payload_scripts": dumped["payload_scripts"],
+	})
+}
+
+func getModelConfig(c *gin.Context) {
+	dumped := config.Dump(stateOf(c).Service().Config)
+	c.JSON(http.StatusOK, gin.H{
+		"providers": dumped["providers"],
+		"combos":    dumped["combos"],
+	})
+}
+
+func putModelConfig(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
+		return
+	}
+	var patch map[string]any
+	if err := json.Unmarshal(body, &patch); err != nil || patch == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
+		return
+	}
+	st := stateOf(c)
+	currMap := config.Dump(st.Service().Config)
+	if v, ok := patch["providers"]; ok {
+		currMap["providers"] = v
+	}
+	if v, ok := patch["combos"]; ok {
+		currMap["combos"] = v
+	}
+	newConfig, err := saveAndReloadRaw(c, currMap)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	dumped := config.Dump(newConfig)
+	c.JSON(http.StatusOK, gin.H{
+		"providers": dumped["providers"],
+		"combos":    dumped["combos"],
+	})
+}
+
+func getMcpConfig(c *gin.Context) {
+	dumped := config.Dump(stateOf(c).Service().Config)
+	providers := dumped["mcp_providers"]
+	if providers == nil {
+		providers = []any{}
+	}
+	combos := dumped["mcp_combos"]
+	if combos == nil {
+		combos = []any{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"mcp_providers": providers,
+		"mcp_combos":    combos,
+	})
+}
+
+func putMcpConfig(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
+		return
+	}
+	var patch map[string]any
+	if err := json.Unmarshal(body, &patch); err != nil || patch == nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "request body must be a JSON object"})
+		return
+	}
+	st := stateOf(c)
+	currMap := config.Dump(st.Service().Config)
+	if v, ok := patch["mcp_providers"]; ok {
+		currMap["mcp_providers"] = v
+	} else if v, ok := patch["providers"]; ok {
+		currMap["mcp_providers"] = v
+	}
+	if v, ok := patch["mcp_combos"]; ok {
+		currMap["mcp_combos"] = v
+	} else if v, ok := patch["combos"]; ok {
+		currMap["mcp_combos"] = v
+	}
+	newConfig, err := saveAndReloadRaw(c, currMap)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	dumped := config.Dump(newConfig)
+	providers := dumped["mcp_providers"]
+	if providers == nil {
+		providers = []any{}
+	}
+	combos := dumped["mcp_combos"]
+	if combos == nil {
+		combos = []any{}
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"mcp_providers": providers,
+		"mcp_combos":    combos,
+	})
 }
 
 // ---- Stats keys ----

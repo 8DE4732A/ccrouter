@@ -42,6 +42,10 @@ type GeneralConfig struct {
 	// AdminPassword is the single-user password required to access the admin console
 	// and management APIs (/admin/api/*). If empty, no authentication is required.
 	AdminPassword string `json:"admin_password,omitempty" yaml:"admin_password,omitempty"`
+
+	// ExternalURL is the public base URL of ccrouter (e.g. "https://gateway.example.com" or "http://localhost:8000").
+	// Used for generating absolute OAuth callback and authorization URLs behind reverse proxies.
+	ExternalURL string `json:"external_url,omitempty" yaml:"external_url,omitempty"`
 }
 
 // RequestTimeoutDisabled is the sentinel value for GeneralConfig.RequestTimeoutSeconds
@@ -198,8 +202,8 @@ func (p *ProviderConfig) GetBaseURL(fmt string) string {
 }
 
 type ComboMember struct {
-	Provider         string `json:"provider" yaml:"provider"`
-	Model            string `json:"model" yaml:"model"`
+	Provider string `json:"provider" yaml:"provider"`
+	Model    string `json:"model" yaml:"model"`
 	// UpstreamAPIFormat overrides the API format sent to this upstream provider.
 	// When set to a value different from the combo's client-facing api_format,
 	// ccrouter uses CLIProxyAPI translator to convert the request/response.
@@ -286,7 +290,6 @@ func (c *ComboConfig) SupportsFormat(fmt string) bool {
 	return false
 }
 
-
 type PayloadScript struct {
 	Name    string `json:"name" yaml:"name"`
 	Enabled bool   `json:"enabled" yaml:"enabled"`
@@ -295,19 +298,67 @@ type PayloadScript struct {
 
 type LoggingConfig struct {
 	Enabled          bool   `json:"enabled" yaml:"enabled"`
-	Dir              string `json:"dir,omitempty" yaml:"dir,omitempty"`                           // default "logs"
-	MaxFileSizeMB    int    `json:"max_file_size_mb,omitempty" yaml:"max_file_size_mb,omitempty"` // default 20 (MB)
-	MaxBackups       int    `json:"max_backups,omitempty" yaml:"max_backups,omitempty"`           // default 10
+	Dir              string `json:"dir,omitempty" yaml:"dir,omitempty"`                             // default "logs"
+	MaxFileSizeMB    int    `json:"max_file_size_mb,omitempty" yaml:"max_file_size_mb,omitempty"`   // default 20 (MB)
+	MaxBackups       int    `json:"max_backups,omitempty" yaml:"max_backups,omitempty"`             // default 10
 	CompressionLevel string `json:"compression_level,omitempty" yaml:"compression_level,omitempty"` // fastest, default, better, best (default "best")
 }
 
+type McpAuthConfig struct {
+	Mode             string   `json:"mode,omitempty" yaml:"mode,omitempty"`         // "none", "api_key", "oauth2" (preferred)
+	Type             string   `json:"type,omitempty" yaml:"type,omitempty"`         // alias for mode
+	Isolated         bool     `json:"isolated,omitempty" yaml:"isolated,omitempty"` // whether each downstream user has independent token
+	APIKey           string   `json:"api_key,omitempty" yaml:"api_key,omitempty"`
+	Header           string   `json:"header,omitempty" yaml:"header,omitempty"` // default "Authorization" (Bearer <key>)
+	ClientID         string   `json:"client_id,omitempty" yaml:"client_id,omitempty"`
+	ClientSecret     string   `json:"client_secret,omitempty" yaml:"client_secret,omitempty"`
+	AuthURL          string   `json:"auth_url,omitempty" yaml:"auth_url,omitempty"`                   // preferred
+	AuthorizationURL string   `json:"authorization_url,omitempty" yaml:"authorization_url,omitempty"` // alias for auth_url
+	TokenURL         string   `json:"token_url,omitempty" yaml:"token_url,omitempty"`
+	Scopes           []string `json:"scopes,omitempty" yaml:"scopes,omitempty"`
+	RedirectURL      string   `json:"redirect_url,omitempty" yaml:"redirect_url,omitempty"`
+}
+
+type McpProviderConfig struct {
+	Name           string            `json:"name" yaml:"name"`
+	Transport      string            `json:"transport" yaml:"transport"` // "stdio", "sse", "streamablehttp"
+	Command        string            `json:"command,omitempty" yaml:"command,omitempty"`
+	Args           []string          `json:"args,omitempty" yaml:"args,omitempty"`
+	Env            map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	WorkingDir     string            `json:"working_dir,omitempty" yaml:"working_dir,omitempty"`
+	URL            string            `json:"url,omitempty" yaml:"url,omitempty"`
+	Headers        map[string]string `json:"headers,omitempty" yaml:"headers,omitempty"`
+	TimeoutSeconds int               `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"` // default 30
+	AuthMode       string            `json:"auth_mode,omitempty" yaml:"auth_mode,omitempty"`             // "shared" (default) or "isolated"
+	Auth           *McpAuthConfig    `json:"auth,omitempty" yaml:"auth,omitempty"`
+	Proxy          *ProxyConfig      `json:"proxy,omitempty" yaml:"proxy,omitempty"`
+}
+
+type McpComboMemberConfig struct {
+	Provider  string   `json:"provider" yaml:"provider"`
+	Prefix    string   `json:"prefix,omitempty" yaml:"prefix,omitempty"`       // prefix for tool names, e.g. "gh" -> "gh__create_issue"
+	Tools     []string `json:"tools,omitempty" yaml:"tools,omitempty"`         // allowed tool names, or ["*"] for all
+	Resources []string `json:"resources,omitempty" yaml:"resources,omitempty"` // allowed resource URIs, or ["*"] for all
+	Prompts   []string `json:"prompts,omitempty" yaml:"prompts,omitempty"`     // allowed prompt names, or ["*"] for all
+}
+
+type McpComboConfig struct {
+	Name         string                 `json:"name" yaml:"name"`
+	OwnedBy      string                 `json:"owned_by,omitempty" yaml:"owned_by,omitempty"`
+	Description  string                 `json:"description,omitempty" yaml:"description,omitempty"`
+	UserIDHeader string                 `json:"user_id_header,omitempty" yaml:"user_id_header,omitempty"` // default "X-User-Id"
+	Members      []McpComboMemberConfig `json:"members" yaml:"members"`
+}
+
 type AppConfig struct {
-	General        GeneralConfig    `json:"general,omitempty" yaml:"general,omitempty"`
-	Providers      []ProviderConfig `json:"providers" yaml:"providers"`
-	Combos         []ComboConfig    `json:"combos" yaml:"combos"`
-	VerboseLogging bool             `json:"verbose_logging" yaml:"verbose_logging"`
-	Logging        LoggingConfig    `json:"logging,omitempty" yaml:"logging,omitempty"`
-	PayloadScripts []PayloadScript  `json:"payload_scripts" yaml:"payload_scripts"`
+	General        GeneralConfig       `json:"general,omitempty" yaml:"general,omitempty"`
+	Providers      []ProviderConfig    `json:"providers" yaml:"providers"`
+	Combos         []ComboConfig       `json:"combos" yaml:"combos"`
+	McpProviders   []McpProviderConfig `json:"mcp_providers,omitempty" yaml:"mcp_providers,omitempty"`
+	McpCombos      []McpComboConfig    `json:"mcp_combos,omitempty" yaml:"mcp_combos,omitempty"`
+	VerboseLogging bool                `json:"verbose_logging" yaml:"verbose_logging"`
+	Logging        LoggingConfig       `json:"logging,omitempty" yaml:"logging,omitempty"`
+	PayloadScripts []PayloadScript     `json:"payload_scripts" yaml:"payload_scripts"`
 }
 
 // ResolveLogDir resolves a log directory path. If dir is relative, it is resolved
@@ -347,4 +398,3 @@ func TestDirWritable(dir string) error {
 	_ = os.Remove(name)
 	return nil
 }
-

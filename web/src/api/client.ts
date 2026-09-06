@@ -149,6 +149,8 @@ export type AppConfig = {
   verbose_logging?: boolean
   providers: ProviderConfig[]
   combos: ComboConfig[]
+  mcp_providers?: McpProviderConfig[]
+  mcp_combos?: McpComboConfig[]
   payload_scripts?: PayloadScript[]
 }
 
@@ -394,3 +396,338 @@ export const logoutAdmin = async () => {
     window.dispatchEvent(new CustomEvent('ccrouter:unauthorized'))
   }
 }
+
+// ---- MCP Types & APIs ----
+
+export type McpAuthConfig = {
+  mode?: 'none' | 'api_key' | 'oauth2'
+  type?: 'none' | 'api_key' | 'oauth2'
+  isolated?: boolean
+  api_key?: string
+  header?: string
+  header_name?: string
+  header_value?: string
+  client_id?: string
+  client_secret?: string
+  auth_url?: string
+  authorization_url?: string
+  token_url?: string
+  scopes?: string[]
+  redirect_url?: string
+}
+
+export type McpProviderConfig = {
+  name: string
+  transport: 'stdio' | 'sse' | 'streamablehttp'
+  timeout_seconds?: number
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  working_dir?: string
+  url?: string
+  headers?: Record<string, string>
+  auth_mode?: 'shared' | 'isolated'
+  auth?: McpAuthConfig
+  proxy?: ProxyConfig
+}
+
+export type McpComboMemberConfig = {
+  provider: string
+  prefix?: string
+  tools?: string[]
+  resources?: string[]
+  prompts?: string[]
+}
+
+export type McpComboConfig = {
+  name: string
+  owned_by?: string
+  description?: string
+  user_id_header?: string
+  members: McpComboMemberConfig[]
+}
+
+export type McpToolInfo = {
+  name: string
+  description?: string
+  inputSchema?: {
+    type: string
+    properties?: Record<string, any>
+    required?: string[]
+  }
+}
+
+export type McpResourceInfo = {
+  uri: string
+  name: string
+  description?: string
+  mimeType?: string
+}
+
+export type McpPromptArgumentInfo = {
+  name: string
+  description?: string
+  required?: boolean
+}
+
+export type McpPromptInfo = {
+  name: string
+  description?: string
+  arguments?: McpPromptArgumentInfo[]
+}
+
+export type McpTestResult = {
+  success: boolean
+  error?: string
+  warning?: string
+  warnings?: string[]
+  server_info?: {
+    name: string
+    version: string
+  }
+  tools?: McpToolInfo[]
+  resources?: McpResourceInfo[]
+  prompts?: McpPromptInfo[]
+}
+
+export type McpCapabilitiesResult = McpTestResult
+
+export type McpComboView = {
+  name: string
+  description: string
+  user_id_header: string
+  tool_count: number
+  tools?: string[]
+}
+
+export type McpTokenItem = {
+  id: number
+  provider: string
+  user_id: string
+  masked_key: string
+  token_type: string
+  scopes?: string
+  expires_at?: number
+  updated_at: number
+}
+
+export const getMcpProviders = () => request<{ providers: McpProviderConfig[] }>('/mcp/providers')
+export const testMcpProvider = (name: string) => request<McpTestResult>('/mcp/providers/test', { method: 'POST', body: JSON.stringify({ name }) })
+export const getMcpProviderCapabilities = (name: string) =>
+  request<McpCapabilitiesResult>(`/mcp/providers/${encodeURIComponent(name)}/capabilities`)
+export const getMcpCombos = () => request<{ combos: McpComboView[] }>('/mcp/combos')
+export const getMcpComboTools = (name: string) => request<{ tools: McpToolInfo[]; error?: string }>(`/mcp/combos/${encodeURIComponent(name)}/tools`)
+export const testMcpComboCall = (payload: { combo: string; tool: string; arguments: Record<string, any>; user_id?: string }) =>
+  request<{ success: boolean; duration_ms: number; result?: any; error?: any }>('/mcp/combos/call', { method: 'POST', body: JSON.stringify(payload) })
+export const getMcpTokens = () => request<{ tokens: McpTokenItem[] }>('/mcp/tokens')
+export const deleteMcpToken = (id: number) => request<{ success: boolean }>(`/mcp/tokens/${id}`, { method: 'DELETE' })
+
+// ---- MCP Info ----
+export type McpInfoMember = {
+  provider: string
+  prefix?: string
+  tools?: string[]
+  resources?: string[]
+  prompts?: string[]
+}
+
+export type McpInfoCombo = {
+  name: string
+  owned_by?: string
+  description?: string
+  user_id_header: string
+  tool_count: number
+  tools: string[]
+  members: McpInfoMember[]
+}
+
+export type McpInfoProvider = {
+  name: string
+  transport: 'stdio' | 'sse' | 'streamablehttp'
+  url?: string
+  command?: string
+  args?: string[]
+  working_dir?: string
+  auth_mode: 'none' | 'api_key' | 'oauth2'
+  isolated: boolean
+  timeout_seconds?: number
+  headers?: string[]
+  is_ready: boolean
+}
+
+export type McpAdminInfo = {
+  version: string
+  runtime: string
+  external_url?: string
+  combos: McpInfoCombo[]
+  providers: McpInfoProvider[]
+  total_tools: number
+  tokens_count: number
+  user_count: number
+  provider_tokens: Record<string, number>
+}
+
+export const getMcpAdminInfo = () => request<McpAdminInfo>('/mcp/info')
+
+// ---- MCP Requests (Audit Log) ----
+export type McpRequestRow = {
+  id: number
+  ts: number
+  combo: string
+  transport: string
+  method: string
+  tool_name: string | null
+  provider: string | null
+  user_id: string | null
+  arguments: string | null
+  result: string | null
+  duration_ms: number | null
+  status_code: number | null
+  success: number
+  error: string | null
+}
+
+export type McpRequestsResp = {
+  total: number
+  items: McpRequestRow[]
+}
+
+export const getMcpRequests = (params: {
+  limit?: number
+  offset?: number
+  combo?: string
+  provider?: string
+  tool?: string
+  user_id?: string
+  method?: string
+  transport?: string
+  q?: string
+  success?: boolean
+  since?: number
+  until?: number
+}) => {
+  const qs = new URLSearchParams()
+  Object.entries(params).forEach(([k, v]) => {
+    if (v != null) qs.set(k, String(v))
+  })
+  return request<McpRequestsResp>(`/mcp/requests?${qs}`)
+}
+
+// ---- MCP Overview & Stats ----
+export type McpOverviewStats = {
+  total_calls: number
+  success_calls: number
+  error_calls: number
+  avg_duration_ms: number
+  unique_tools: number
+  active_providers: number
+  active_combos: number
+  active_users: number
+}
+
+export type McpSummaryRow = {
+  group_key: string
+  total: number
+  success_count: number
+  error_count: number
+  avg_duration_ms: number
+  min_duration_ms?: number
+  max_duration_ms?: number
+}
+
+export type McpTrendRow = {
+  bucket_ts: number
+  total: number
+  success_count: number
+}
+
+export const getMcpStatsSummary = (params?: { group_by?: string; since?: number; until?: number }) => {
+  const qs = new URLSearchParams()
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v != null) qs.set(k, String(v))
+    })
+  }
+  return request<{ data: McpSummaryRow[]; overview: McpOverviewStats; group_by: string }>(`/mcp/stats/summary?${qs}`)
+}
+
+export const getMcpStatsTrend = (params?: { bucket?: string; since?: number; until?: number }) => {
+  const qs = new URLSearchParams()
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v != null) qs.set(k, String(v))
+    })
+  }
+  return request<{ data: McpTrendRow[]; bucket: string }>(`/mcp/stats/trend?${qs}`)
+}
+
+// Modular Config Endpoints (common / model / mcp)
+export type McpConfigSection = {
+  mcp_providers: McpProviderConfig[]
+  mcp_combos: McpComboConfig[]
+}
+
+export const getMcpConfig = () => request<McpConfigSection>('/config/mcp')
+export const putMcpConfig = (payload: McpConfigSection) =>
+  request<McpConfigSection>('/config/mcp', { method: 'PUT', body: JSON.stringify(payload) })
+
+export type ModelConfigSection = {
+  providers: ProviderConfig[]
+  combos: ComboConfig[]
+}
+
+export const getModelConfig = () => request<ModelConfigSection>('/config/model')
+export const putModelConfig = (payload: ModelConfigSection) =>
+  request<ModelConfigSection>('/config/model', { method: 'PUT', body: JSON.stringify(payload) })
+
+export type CommonConfigSection = {
+  general: GeneralConfig
+  logging: LoggingConfig
+  verbose_logging: boolean
+  payload_scripts: PayloadScript[]
+}
+
+export const getCommonConfig = () => request<CommonConfigSection>('/config/common')
+export const putCommonConfig = (payload: Partial<CommonConfigSection>) =>
+  request<CommonConfigSection>('/config/common', { method: 'PUT', body: JSON.stringify(payload) })
+
+export const patchConfig = (patch: Record<string, any>) =>
+  request<AppConfig>('/config', { method: 'PATCH', body: JSON.stringify(patch) })
+
+export const EMPTY_MCP_PROVIDER = (): McpProviderConfig => ({
+  name: '',
+  transport: 'stdio',
+  timeout_seconds: 30,
+  command: '',
+  args: [],
+  env: {},
+  working_dir: '',
+  url: '',
+  headers: {},
+  auth_mode: 'shared',
+  auth: {
+    mode: 'none',
+    isolated: false,
+    header: 'Authorization',
+    api_key: '',
+    client_id: '',
+    client_secret: '',
+    auth_url: '',
+    token_url: '',
+    scopes: [],
+  },
+})
+
+export const EMPTY_MCP_COMBO = (): McpComboConfig => ({
+  name: '',
+  description: '',
+  user_id_header: 'X-User-Id',
+  members: [
+    {
+      provider: '',
+      prefix: '',
+      tools: ['*'],
+    },
+  ],
+})
+

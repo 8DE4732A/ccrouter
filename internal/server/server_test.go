@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +15,7 @@ import (
 	"ccrouter/internal/config"
 	"ccrouter/internal/db"
 	"ccrouter/internal/gateway"
+	"ccrouter/internal/mcp/protocol"
 	"ccrouter/internal/report"
 )
 
@@ -452,7 +455,6 @@ func TestImageEditsRoute(t *testing.T) {
 	}
 }
 
-
 func TestAdminAuthentication(t *testing.T) {
 	// 1. Unauthenticated mode (admin_password not set)
 	stNoAuth, _ := newTestState(t)
@@ -783,3 +785,430 @@ func TestAdminLogsNilReport(t *testing.T) {
 	}
 }
 
+func TestMcpServerEndpoints(t *testing.T) {
+	// 1. Mock upstream MCP server
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req protocol.Request
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch req.Method {
+		case "initialize":
+			res := protocol.NewResponse(req.ID, protocol.InitializeResult{
+				ProtocolVersion: protocol.LatestProtocolVersion,
+				ServerInfo:      protocol.Implementation{Name: "upstream-mock", Version: "1.0"},
+			})
+			_ = json.NewEncoder(w).Encode(res)
+		case "tools/list":
+			res := protocol.NewResponse(req.ID, protocol.ListToolsResult{
+				Tools: []protocol.Tool{
+					{Name: "echo", Description: "Echo tool"},
+				},
+			})
+			_ = json.NewEncoder(w).Encode(res)
+		case "tools/call":
+			authHeader := r.Header.Get("Authorization")
+			if authHeader != "Bearer valid-alice-token" {
+				res := protocol.NewErrorResponse(req.ID, protocol.CodeAuthRequired, "Unauthorized", nil)
+				_ = json.NewEncoder(w).Encode(res)
+				return
+			}
+			res := protocol.NewResponse(req.ID, protocol.CallToolResult{
+				Content: []protocol.Content{{Type: "text", Text: "echoed"}},
+			})
+			_ = json.NewEncoder(w).Encode(res)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	// 2. Setup state with MCP configuration
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgText := fmt.Sprintf(`
+providers:
+  - name: dummy
+    api: [{api_format: openai, base_url: "http://127.0.0.1:1/v1"}]
+    keys: [{key: "sk-dummy"}]
+combos:
+  - name: dummy-c
+    api_format: openai
+    members: [{provider: dummy, model: m}]
+mcp_providers:
+  - name: mock-prov
+    transport: streamablehttp
+    url: %q
+    auth_mode: isolated
+    auth:
+      type: oauth2
+      client_id: "client-id"
+      authorization_url: "http://oauth.test/auth"
+      token_url: "http://oauth.test/token"
+mcp_combos:
+  - name: test-combo
+    user_id_header: "X-User-Id"
+    members:
+      - provider: mock-prov
+        prefix: "mock"
+        tools: ["*"]
+`, upstreamServer.URL)
+
+	if err := os.WriteFile(cfgPath, []byte(cfgText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	appCfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+
+	rec, err := db.NewRecorder(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+
+	st, err := gateway.New(appCfg, cfgPath, rec, nil)
+	if err != nil {
+		t.Fatalf("init state: %v", err)
+	}
+	defer st.Close()
+
+	r := Router(st)
+
+	// 3. Test POST /mcp/test-combo -> initialize
+	initReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  "initialize",
+	}
+	w := doJSON(t, r, "POST", "/mcp/test-combo", initReq)
+	if w.Code != 200 {
+		t.Fatalf("initialize failed with code %d: %s", w.Code, w.Body.String())
+	}
+	var initResp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &initResp)
+	result := initResp["result"].(map[string]any)
+	serverInfo := result["serverInfo"].(map[string]any)
+	if serverInfo["name"] != "ccrouter-mcp/test-combo" {
+		t.Fatalf("unexpected serverInfo: %#v", serverInfo)
+	}
+
+	// 4. Test POST /mcp/test-combo -> tools/list
+	listReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "tools/list",
+	}
+	w = doJSON(t, r, "POST", "/mcp/test-combo", listReq)
+	if w.Code != 200 {
+		t.Fatalf("tools/list failed with code %d: %s", w.Code, w.Body.String())
+	}
+	var listResp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &listResp)
+	toolsResult := listResp["result"].(map[string]any)
+	tools := toolsResult["tools"].([]any)
+	if len(tools) != 1 {
+		t.Fatalf("expected 1 tool, got %d", len(tools))
+	}
+	tool0 := tools[0].(map[string]any)
+	if tool0["name"] != "mock__echo" {
+		t.Fatalf("expected tool name mock__echo, got %v", tool0["name"])
+	}
+
+	// 5. Test POST /mcp/test-combo -> tools/call without token -> expect -32001
+	callReq := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "mock__echo",
+		},
+	}
+	callReqBody, _ := json.Marshal(callReq)
+	httpReq, _ := http.NewRequest("POST", "/mcp/test-combo", bytes.NewReader(callReqBody))
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("X-User-Id", "alice")
+	recW := httptest.NewRecorder()
+	r.ServeHTTP(recW, httpReq)
+
+	if recW.Code != 200 {
+		t.Fatalf("expected 200 with jsonrpc error, got %d: %s", recW.Code, recW.Body.String())
+	}
+	if recW.Header().Get("X-MCP-Auth-Required") != "true" {
+		t.Fatalf("expected X-MCP-Auth-Required: true header, got %q", recW.Header().Get("X-MCP-Auth-Required"))
+	}
+	var callErrResp map[string]any
+	_ = json.Unmarshal(recW.Body.Bytes(), &callErrResp)
+	errObj := callErrResp["error"].(map[string]any)
+	if errObj["code"].(float64) != -32001 {
+		t.Fatalf("expected code -32001, got %v", errObj["code"])
+	}
+	errData := errObj["data"].(map[string]any)
+	if errData["user_id"] != "alice" || errData["provider"] != "mock-prov" || errData["auth_url"] == "" {
+		t.Fatalf("unexpected error data: %#v", errData)
+	}
+
+	// 6. Save token for alice -> next call succeeds!
+	exp := int64(9999999999)
+	if err := rec.SaveMcpToken(&db.McpUserToken{
+		Provider:    "mock-prov",
+		UserID:      "alice",
+		AccessToken: "valid-alice-token",
+		ExpiresAt:   &exp,
+	}); err != nil {
+		t.Fatalf("SaveMcpToken error: %v", err)
+	}
+
+	recW2 := httptest.NewRecorder()
+	httpReq2, _ := http.NewRequest("POST", "/mcp/test-combo", bytes.NewReader(callReqBody))
+	httpReq2.Header.Set("Content-Type", "application/json")
+	httpReq2.Header.Set("X-User-Id", "alice")
+	r.ServeHTTP(recW2, httpReq2)
+
+	if recW2.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", recW2.Code, recW2.Body.String())
+	}
+	var callSuccessResp map[string]any
+	_ = json.Unmarshal(recW2.Body.Bytes(), &callSuccessResp)
+	if callSuccessResp["error"] != nil {
+		t.Fatalf("expected no error, got: %#v", callSuccessResp["error"])
+	}
+
+	// 7. Test Admin APIs
+	w = doGET(t, r, "/admin/api/mcp/providers")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/providers, got %d", w.Code)
+	}
+
+	w = doGET(t, r, "/admin/api/mcp/combos")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/combos, got %d", w.Code)
+	}
+
+	w = doGET(t, r, "/admin/api/mcp/tokens")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/tokens, got %d", w.Code)
+	}
+	var tokensResp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &tokensResp)
+	tokenList := tokensResp["tokens"].([]any)
+	if len(tokenList) != 1 {
+		t.Fatalf("expected 1 token in list, got %d", len(tokenList))
+	}
+
+	// 8. Test Admin Combo Tools & Call
+	w = doGET(t, r, "/admin/api/mcp/combos/test-combo/tools")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/combos/test-combo/tools, got %d", w.Code)
+	}
+	var comboToolsResp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &comboToolsResp)
+	cTools := comboToolsResp["tools"].([]any)
+	if len(cTools) != 1 {
+		t.Fatalf("expected 1 tool in comboToolsResp, got %d", len(cTools))
+	}
+
+	callPayload := map[string]any{
+		"combo":     "test-combo",
+		"tool":      "mock__echo",
+		"arguments": map[string]any{"msg": "admin-hello"},
+		"user_id":   "alice",
+	}
+	w = doJSON(t, r, "POST", "/admin/api/mcp/combos/call", callPayload)
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/combos/call, got %d: %s", w.Code, w.Body.String())
+	}
+	var adminCallResp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &adminCallResp)
+	if adminCallResp["success"] != true {
+		t.Fatalf("expected success true in adminCallResp: %#v", adminCallResp)
+	}
+
+	// 9. Test Admin MCP Info
+	w = doGET(t, r, "/admin/api/mcp/info")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/info, got %d: %s", w.Code, w.Body.String())
+	}
+	var mcpInfoResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &mcpInfoResp); err != nil {
+		t.Fatalf("unmarshal mcp info: %v", err)
+	}
+	if _, ok := mcpInfoResp["version"]; !ok {
+		t.Fatalf("expected version in mcp info, got %#v", mcpInfoResp)
+	}
+	if _, ok := mcpInfoResp["combos"]; !ok {
+		t.Fatalf("expected combos in mcp info, got %#v", mcpInfoResp)
+	}
+	if _, ok := mcpInfoResp["providers"]; !ok {
+		t.Fatalf("expected providers in mcp info, got %#v", mcpInfoResp)
+	}
+
+	// 10. Test Admin MCP Requests
+	rec.Flush()
+	w = doGET(t, r, "/admin/api/mcp/requests")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/requests, got %d: %s", w.Code, w.Body.String())
+	}
+	var mcpReqsResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &mcpReqsResp); err != nil {
+		t.Fatalf("unmarshal mcp requests: %v", err)
+	}
+	items, ok := mcpReqsResp["items"].([]any)
+	if !ok || len(items) == 0 {
+		t.Fatalf("expected at least 1 recorded mcp request, got %#v", mcpReqsResp)
+	}
+
+	// 11. Test Admin MCP Stats Summary
+	w = doGET(t, r, "/admin/api/mcp/stats/summary?group_by=combo")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/stats/summary, got %d: %s", w.Code, w.Body.String())
+	}
+	var summaryResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &summaryResp); err != nil {
+		t.Fatalf("unmarshal mcp stats summary: %v", err)
+	}
+	if _, ok := summaryResp["overview"]; !ok {
+		t.Fatalf("expected overview in summary resp, got %#v", summaryResp)
+	}
+
+	// 12. Test Admin MCP Stats Trend
+	w = doGET(t, r, "/admin/api/mcp/stats/trend?bucket=hour")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from /admin/api/mcp/stats/trend, got %d: %s", w.Code, w.Body.String())
+	}
+	var trendResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &trendResp); err != nil {
+		t.Fatalf("unmarshal mcp stats trend: %v", err)
+	}
+	if _, ok := trendResp["data"]; !ok {
+		t.Fatalf("expected data in trend resp, got %#v", trendResp)
+	}
+}
+
+func TestModularConfigEndpoints(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfgText := `
+providers:
+  - name: dummy
+    api: [{api_format: openai, base_url: "http://127.0.0.1:1/v1"}]
+    keys: [{key: "sk-dummy"}]
+combos:
+  - name: dummy-c
+    api_format: openai
+    members: [{provider: dummy, model: m}]
+`
+	if err := os.WriteFile(cfgPath, []byte(cfgText), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appCfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	rec, err := db.NewRecorder(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+
+	st, err := gateway.New(appCfg, cfgPath, rec, nil)
+	if err != nil {
+		t.Fatalf("init state: %v", err)
+	}
+	defer st.Close()
+
+	r := Router(st)
+
+	// 1. Test /admin/api/config/common
+	w := doGET(t, r, "/admin/api/config/common")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from GET /admin/api/config/common, got %d", w.Code)
+	}
+	var commonResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &commonResp); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := commonResp["logging"]; !ok {
+		t.Fatalf("expected logging key in common config, got %#v", commonResp)
+	}
+
+	w = doJSON(t, r, "PUT", "/admin/api/config/common", map[string]any{
+		"verbose_logging": true,
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from PUT /admin/api/config/common, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 2. Test /admin/api/config/model
+	w = doGET(t, r, "/admin/api/config/model")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from GET /admin/api/config/model, got %d", w.Code)
+	}
+	var modelResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &modelResp); err != nil {
+		t.Fatal(err)
+	}
+	provs, ok := modelResp["providers"].([]any)
+	if !ok || len(provs) == 0 {
+		t.Fatalf("expected non-empty providers in model config, got %#v", modelResp)
+	}
+
+	// 3. Test /admin/api/config/mcp
+	w = doGET(t, r, "/admin/api/config/mcp")
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from GET /admin/api/config/mcp, got %d", w.Code)
+	}
+	var mcpResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &mcpResp); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := mcpResp["mcp_providers"]; !ok {
+		t.Fatalf("expected mcp_providers in mcp config, got %#v", mcpResp)
+	}
+
+	// PUT /admin/api/config/mcp with exa streamable provider (including header_name)
+	mcpPayload := map[string]any{
+		"mcp_providers": []any{
+			map[string]any{
+				"name":            "exa",
+				"transport":       "streamablehttp",
+				"timeout_seconds": 30,
+				"url":             "https://mcp.exa.ai/mcp",
+				"headers":         map[string]any{"x-api-key": "123123"},
+				"auth_mode":       "shared",
+				"auth": map[string]any{
+					"mode":        "none",
+					"header_name": "Authorization",
+				},
+			},
+		},
+		"mcp_combos": []any{},
+	}
+	w = doJSON(t, r, "PUT", "/admin/api/config/mcp", mcpPayload)
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from PUT /admin/api/config/mcp, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Verify GET /admin/api/config/mcp reflects new provider
+	w = doGET(t, r, "/admin/api/config/mcp")
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &mcpResp)
+	mcpProvs := mcpResp["mcp_providers"].([]any)
+	if len(mcpProvs) != 1 {
+		t.Fatalf("expected 1 mcp provider, got %d", len(mcpProvs))
+	}
+	p0 := mcpProvs[0].(map[string]any)
+	if p0["name"] != "exa" || p0["transport"] != "streamablehttp" {
+		t.Fatalf("unexpected provider saved: %#v", p0)
+	}
+
+	// 4. Test PATCH /admin/api/config
+	w = doJSON(t, r, "PATCH", "/admin/api/config", map[string]any{
+		"verbose_logging": false,
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200 from PATCH /admin/api/config, got %d: %s", w.Code, w.Body.String())
+	}
+}

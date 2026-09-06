@@ -66,6 +66,16 @@ func loadFromText(t *testing.T, text string) *AppConfig {
 	return cfg
 }
 
+func loadFromTextErr(t *testing.T, text string) (*AppConfig, error) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return Load(path)
+}
+
 func TestLoadsMinimalValid(t *testing.T) {
 	cfg := loadFromText(t, minimal)
 	if len(cfg.Providers) != 1 || cfg.Providers[0].Name != "sn" {
@@ -229,7 +239,6 @@ combos:
 		t.Fatal("expected explicit openai-image-edits support for combo")
 	}
 }
-
 
 func mustReject(t *testing.T, text string) {
 	t.Helper()
@@ -551,7 +560,6 @@ func TestTestDirWritable(t *testing.T) {
 		t.Fatal("expected error when trying to create dir inside a file, got nil")
 	}
 }
-
 
 // TestRequestTimeoutHoursRoundtrip verifies the request_timeout_seconds field is
 // parsed, validated, and round-tripped through Dump/Build.
@@ -900,5 +908,342 @@ combos:
 		if _, exists := genEmpty["admin_password"]; exists {
 			t.Fatalf("expected empty admin_password to not be in dump")
 		}
+	}
+}
+
+func TestMcpConfigFullAndRoundtrip(t *testing.T) {
+	text := `
+providers:
+  - name: test-p
+    api:
+      - api_format: openai
+        base_url: "https://api.openai.com/v1"
+    keys:
+      - key: sk-dummy
+combos:
+  - name: gpt
+    api_format: openai
+    members:
+      - provider: test-p
+        model: gpt-4o
+mcp_providers:
+  - name: local-fs
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    env:
+      DEBUG: "true"
+    working_dir: "/tmp"
+    auth_mode: shared
+  - name: remote-sse
+    transport: sse
+    url: "https://mcp.remote.test/sse"
+    auth_mode: shared
+    auth:
+      type: api_key
+      api_key: "sk-mcp-test"
+      header: "Authorization"
+  - name: remote-oauth
+    transport: streamablehttp
+    url: "https://mcp.oauth.test/mcp"
+    auth_mode: isolated
+    auth:
+      type: oauth2
+      client_id: "client-123"
+      client_secret: "secret-456"
+      authorization_url: "https://oauth.test/auth"
+      token_url: "https://oauth.test/token"
+      scopes: ["repo", "read:user"]
+      redirect_url: "https://router.test/mcp/auth/callback"
+mcp_combos:
+  - name: dev-tools
+    description: "Developer tools combo"
+    user_id_header: "X-User-Id"
+    members:
+      - provider: local-fs
+        prefix: "fs"
+        tools: ["read_file", "list_directory"]
+      - provider: remote-sse
+        prefix: ""
+        tools: ["*"]
+      - provider: remote-oauth
+        prefix: "oauth"
+        tools: ["get_user"]
+`
+	cfg := loadFromText(t, text)
+	if len(cfg.McpProviders) != 3 {
+		t.Fatalf("expected 3 mcp providers, got %d", len(cfg.McpProviders))
+	}
+	if cfg.McpProviders[0].Name != "local-fs" || cfg.McpProviders[0].Transport != "stdio" {
+		t.Fatalf("unexpected mcp provider 0: %#v", cfg.McpProviders[0])
+	}
+	if cfg.McpProviders[1].Auth == nil || cfg.McpProviders[1].Auth.APIKey != "sk-mcp-test" {
+		t.Fatalf("unexpected auth for provider 1: %#v", cfg.McpProviders[1].Auth)
+	}
+	if cfg.McpProviders[2].Auth == nil || cfg.McpProviders[2].Auth.Type != "oauth2" || cfg.McpProviders[2].AuthMode != "isolated" {
+		t.Fatalf("unexpected auth for provider 2: %#v", cfg.McpProviders[2].Auth)
+	}
+
+	if len(cfg.McpCombos) != 1 {
+		t.Fatalf("expected 1 mcp combo, got %d", len(cfg.McpCombos))
+	}
+	combo := cfg.McpCombos[0]
+	if combo.Name != "dev-tools" || combo.UserIDHeader != "X-User-Id" {
+		t.Fatalf("unexpected mcp combo: %#v", combo)
+	}
+	if len(combo.Members) != 3 {
+		t.Fatalf("expected 3 members in mcp combo, got %d", len(combo.Members))
+	}
+	if combo.Members[0].Prefix != "fs" || len(combo.Members[0].Tools) != 2 {
+		t.Fatalf("unexpected combo member 0: %#v", combo.Members[0])
+	}
+
+	// Test Dump and rebuild
+	dumped := Dump(cfg)
+	if _, ok := dumped["mcp_providers"]; !ok {
+		t.Fatalf("expected mcp_providers in dumped map")
+	}
+	if _, ok := dumped["mcp_combos"]; !ok {
+		t.Fatalf("expected mcp_combos in dumped map")
+	}
+	rebuilt, err := Build(dumped)
+	if err != nil {
+		t.Fatalf("failed to rebuild from dumped map: %v", err)
+	}
+	if len(rebuilt.McpProviders) != 3 || len(rebuilt.McpCombos) != 1 {
+		t.Fatalf("rebuilt mcp mismatch: %d providers, %d combos", len(rebuilt.McpProviders), len(rebuilt.McpCombos))
+	}
+}
+
+func TestMcpConfigValidation(t *testing.T) {
+	// Unknown provider in combo
+	invalidCombo := `
+providers:
+  - name: test-p
+    api: [{api_format: openai, base_url: "https://test"}]
+    keys: [{key: k}]
+combos:
+  - name: c
+    api_format: openai
+    members: [{provider: test-p, model: m}]
+mcp_providers:
+  - name: prov-1
+    transport: stdio
+    command: ls
+mcp_combos:
+  - name: combo-1
+    members:
+      - provider: nonexistent-prov
+`
+	_, err := loadFromTextErr(t, invalidCombo)
+	if err == nil {
+		t.Fatal("expected error for nonexistent provider in mcp_combo, got nil")
+	}
+
+	// Invalid transport
+	invalidTransport := `
+providers:
+  - name: test-p
+    api: [{api_format: openai, base_url: "https://test"}]
+    keys: [{key: k}]
+combos:
+  - name: c
+    api_format: openai
+    members: [{provider: test-p, model: m}]
+mcp_providers:
+  - name: prov-1
+    transport: websocket
+`
+	_, err = loadFromTextErr(t, invalidTransport)
+	if err == nil {
+		t.Fatal("expected error for invalid mcp transport, got nil")
+	}
+
+	// Missing command for stdio
+	missingCmd := `
+providers:
+  - name: test-p
+    api: [{api_format: openai, base_url: "https://test"}]
+    keys: [{key: k}]
+combos:
+  - name: c
+    api_format: openai
+    members: [{provider: test-p, model: m}]
+mcp_providers:
+  - name: prov-1
+    transport: stdio
+`
+	_, err = loadFromTextErr(t, missingCmd)
+	if err == nil {
+		t.Fatal("expected error for missing command in stdio mcp_provider, got nil")
+	}
+
+	// OAuth2 with shared mode (Review point #9)
+	oauthShared := `
+providers:
+  - name: test-p
+    api: [{api_format: openai, base_url: "https://test"}]
+    keys: [{key: k}]
+combos:
+  - name: c
+    api_format: openai
+    members: [{provider: test-p, model: m}]
+mcp_providers:
+  - name: prov-1
+    transport: streamablehttp
+    url: "https://example.com"
+    auth:
+      mode: oauth2
+      isolated: false
+      client_id: "cid"
+      auth_url: "https://auth"
+      token_url: "https://token"
+`
+	_, err = loadFromTextErr(t, oauthShared)
+	if err == nil {
+		t.Fatal("expected error for oauth2 with shared mode, got nil")
+	}
+
+	// Unknown key in mcp_providers
+	unknownKeyProv := `
+providers:
+  - name: test-p
+    api: [{api_format: openai, base_url: "https://test"}]
+    keys: [{key: k}]
+combos:
+  - name: c
+    api_format: openai
+    members: [{provider: test-p, model: m}]
+mcp_providers:
+  - name: prov-1
+    transport: stdio
+    command: ls
+    invalid_field_foo: true
+`
+	_, err = loadFromTextErr(t, unknownKeyProv)
+	if err == nil {
+		t.Fatal("expected error for unknown key in mcp_providers, got nil")
+	}
+
+	// Slash in combo name
+	slashCombo := `
+providers:
+  - name: test-p
+    api: [{api_format: openai, base_url: "https://test"}]
+    keys: [{key: k}]
+combos:
+  - name: c
+    api_format: openai
+    members: [{provider: test-p, model: m}]
+mcp_providers:
+  - name: prov-1
+    transport: stdio
+    command: ls
+mcp_combos:
+  - name: "group/combo"
+    members: [{provider: prov-1}]
+`
+	_, err = loadFromTextErr(t, slashCombo)
+	if err == nil {
+		t.Fatal("expected error for slash in mcp_combo name, got nil")
+	}
+
+	// Canonical documentation schema test
+	docConfig := `
+general:
+  external_url: "https://gateway.example.com"
+providers:
+  - name: test-p
+    api: [{api_format: openai, base_url: "https://test"}]
+    keys: [{key: k}]
+combos:
+  - name: c
+    api_format: openai
+    members: [{provider: test-p, model: m}]
+mcp_providers:
+  - name: fs-local
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    timeout_seconds: 45
+  - name: gdrive
+    transport: streamablehttp
+    url: "https://mcp.example.com/gdrive"
+    timeout_seconds: 30
+    auth:
+      mode: oauth2
+      isolated: true
+      client_id: "cid"
+      client_secret: "csec"
+      auth_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+mcp_combos:
+  - name: assistant
+    description: "test combo"
+    user_id_header: "X-User-Id"
+    members:
+      - provider: fs-local
+        prefix: "fs"
+      - provider: gdrive
+        prefix: "gdrive"
+`
+	parsedDocCfg := loadFromText(t, docConfig)
+	if parsedDocCfg.General.ExternalURL != "https://gateway.example.com" {
+		t.Fatalf("unexpected external_url: %s", parsedDocCfg.General.ExternalURL)
+	}
+	if len(parsedDocCfg.McpProviders) != 2 {
+		t.Fatalf("expected 2 mcp providers, got %d", len(parsedDocCfg.McpProviders))
+	}
+	p0 := parsedDocCfg.McpProviders[0]
+	if p0.TimeoutSeconds != 45 {
+		t.Fatalf("expected timeout_seconds 45, got %d", p0.TimeoutSeconds)
+	}
+	p1 := parsedDocCfg.McpProviders[1]
+	if p1.AuthMode != "isolated" || p1.Auth == nil || p1.Auth.Mode != "oauth2" || p1.Auth.AuthURL != "https://accounts.google.com/o/oauth2/v2/auth" {
+		t.Fatalf("unexpected p1 auth: %#v, auth_mode: %s", p1.Auth, p1.AuthMode)
+	}
+
+	// Test header_name and header_value compatibility
+	compatConfig := `
+providers:
+  - name: test-p
+    api: [{api_format: openai, base_url: "https://test"}]
+    keys: [{key: k}]
+combos:
+  - name: c
+    api_format: openai
+    members: [{provider: test-p, model: m}]
+mcp_providers:
+  - name: exa-test
+    transport: streamablehttp
+    url: "https://mcp.exa.ai/mcp"
+    headers:
+      x-api-key: "123123"
+    auth:
+      mode: "none"
+      isolated: false
+      header_name: "Authorization"
+      header_value: ""
+      client_id: ""
+  - name: api-key-compat
+    transport: streamablehttp
+    url: "https://mcp.api.com"
+    auth:
+      mode: "api_key"
+      header_name: "X-Custom-Key"
+      header_value: "secret-token-123"
+`
+	compatCfg := loadFromText(t, compatConfig)
+	if len(compatCfg.McpProviders) != 2 {
+		t.Fatalf("expected 2 mcp providers in compatCfg, got %d", len(compatCfg.McpProviders))
+	}
+	exa := compatCfg.McpProviders[0]
+	if exa.Name != "exa-test" || exa.AuthMode != "shared" {
+		t.Fatalf("unexpected exa auth: %#v", exa)
+	}
+	ak := compatCfg.McpProviders[1]
+	if ak.Auth == nil || ak.Auth.Header != "X-Custom-Key" || ak.Auth.APIKey != "secret-token-123" {
+		t.Fatalf("unexpected api_key auth: %#v", ak.Auth)
 	}
 }

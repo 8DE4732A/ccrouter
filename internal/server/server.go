@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"ccrouter/internal/gateway"
+	"ccrouter/internal/mcp/transport"
 
 	"github.com/gin-gonic/gin"
 )
@@ -67,6 +68,50 @@ func Router(state *gateway.State) *gin.Engine {
 		})
 	}
 
+	// ---- MCP Public OAuth endpoints ----
+	r.GET("/mcp/auth/start", func(c *gin.Context) { handleMcpAuthStart(c, state) })
+	r.GET("/mcp/auth/callback", func(c *gin.Context) { handleMcpAuthCallback(c, state) })
+
+	// ---- MCP Gateway endpoints ----
+	mcpGroup := r.Group("/mcp", authMW)
+	{
+		mcpGroup.POST("/:combo", func(c *gin.Context) {
+			if state.MCP() != nil {
+				transport.NewHandler(state.MCP()).HandleHTTP(c)
+			} else {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "mcp gateway not initialized"})
+			}
+		})
+		mcpGroup.GET("/:combo", func(c *gin.Context) {
+			if state.MCP() != nil {
+				transport.NewHandler(state.MCP()).HandleMethodNotAllowed(c)
+			} else {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "mcp gateway not initialized"})
+			}
+		})
+		mcpGroup.DELETE("/:combo", func(c *gin.Context) {
+			if state.MCP() != nil {
+				transport.NewHandler(state.MCP()).HandleMethodNotAllowed(c)
+			} else {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "mcp gateway not initialized"})
+			}
+		})
+		mcpGroup.GET("/:combo/sse", func(c *gin.Context) {
+			if state.MCP() != nil {
+				transport.NewHandler(state.MCP()).HandleSSE(c)
+			} else {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "mcp gateway not initialized"})
+			}
+		})
+		mcpGroup.POST("/:combo/message", func(c *gin.Context) {
+			if state.MCP() != nil {
+				transport.NewHandler(state.MCP()).HandleMessage(c)
+			} else {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "mcp gateway not initialized"})
+			}
+		})
+	}
+
 	// ---- Admin API ----
 	admin := r.Group("/admin/api", func(c *gin.Context) { c.Set("state", state) })
 	{
@@ -80,6 +125,13 @@ func Router(state *gateway.State) *gin.Engine {
 		{
 			protected.GET("/config", getConfig)
 			protected.PUT("/config", putConfig)
+			protected.PATCH("/config", patchConfig)
+			protected.GET("/config/common", getCommonConfig)
+			protected.PUT("/config/common", putCommonConfig)
+			protected.GET("/config/model", getModelConfig)
+			protected.PUT("/config/model", putModelConfig)
+			protected.GET("/config/mcp", getMcpConfig)
+			protected.PUT("/config/mcp", putMcpConfig)
 			protected.GET("/stats/keys", statsKeys)
 			protected.GET("/stats/summary", statsSummary)
 			protected.GET("/stats/trend", statsTrend)
@@ -90,6 +142,18 @@ func Router(state *gateway.State) *gin.Engine {
 			protected.GET("/logs/detail/:ts", getLogDetail)
 			protected.GET("/logs/settings", getLogSettings)
 			protected.PUT("/logs/settings", putLogSettings)
+			protected.GET("/mcp/providers", listMcpProviders)
+			protected.POST("/mcp/providers/test", testMcpProvider)
+			protected.GET("/mcp/providers/:name/capabilities", getMcpProviderCapabilities)
+			protected.GET("/mcp/combos", listMcpCombos)
+			protected.GET("/mcp/combos/:name/tools", getMcpComboTools)
+			protected.POST("/mcp/combos/call", testMcpComboCall)
+			protected.GET("/mcp/tokens", listMcpTokens)
+			protected.DELETE("/mcp/tokens/:id", deleteMcpToken)
+			protected.GET("/mcp/info", adminMcpInfo)
+			protected.GET("/mcp/requests", listMcpRequests)
+			protected.GET("/mcp/stats/summary", getMcpStatsSummary)
+			protected.GET("/mcp/stats/trend", getMcpStatsTrend)
 		}
 	}
 

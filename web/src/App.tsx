@@ -7,6 +7,13 @@ import ConfigEditor from './pages/ConfigEditor'
 import TestPage from './pages/Test'
 import InfoPage from './pages/Info'
 import LogsPage from './pages/Logs'
+import McpOverview from './pages/McpOverview'
+import McpRequests from './pages/McpRequests'
+import McpLogs from './pages/McpLogs'
+import McpConfig from './pages/McpConfig'
+import McpTest from './pages/McpTest'
+import McpInfoPage from './pages/McpInfo'
+import McpTokens from './pages/McpTokens'
 import Login from './components/Login'
 import { fetchAuthStatus, logoutAdmin } from './api/client'
 
@@ -99,6 +106,16 @@ function IconSidebarExpand() {
   )
 }
 
+
+function IconKey() {
+  return (
+    <svg className="nav-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+      <circle cx="5" cy="8" r="3" />
+      <path d="M8 8h6M11 8v2M13 8v2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 export default function App() {
   const [authRequired, setAuthRequired] = useState(false)
   const [loggedIn, setLoggedIn] = useState(true)
@@ -182,7 +199,7 @@ export default function App() {
           </button>
         </div>
         <div className="nav-section">
-          <div className="nav-label">监控</div>
+          <div className="nav-label">model</div>
           <NavLink to="/" end className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '概览' : undefined}>
             <IconChart /><span>概览</span>
           </NavLink>
@@ -192,7 +209,6 @@ export default function App() {
           <NavLink to="/logs" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '日志' : undefined}>
             <IconLog /><span>日志</span>
           </NavLink>
-          <div className="nav-label" style={{ marginTop: 16 }}>管理</div>
           <NavLink to="/config" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '配置' : undefined}>
             <IconSettings /><span>配置</span>
           </NavLink>
@@ -202,11 +218,33 @@ export default function App() {
           <NavLink to="/info" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '信息' : undefined}>
             <IconInfo /><span>信息</span>
           </NavLink>
+          <div className="nav-label" style={{ marginTop: 16 }}>mcp</div>
+          <NavLink to="/mcp" end className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '概览' : undefined}>
+            <IconChart /><span>概览</span>
+          </NavLink>
+          <NavLink to="/mcp/requests" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '请求明细' : undefined}>
+            <IconList /><span>请求明细</span>
+          </NavLink>
+          <NavLink to="/mcp/logs" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '日志' : undefined}>
+            <IconLog /><span>日志</span>
+          </NavLink>
+          <NavLink to="/mcp/config" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '配置' : undefined}>
+            <IconSettings /><span>配置</span>
+          </NavLink>
+          <NavLink to="/mcp/test" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '测试' : undefined}>
+            <IconFlask /><span>测试</span>
+          </NavLink>
+          <NavLink to="/mcp/info" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '信息' : undefined}>
+            <IconInfo /><span>信息</span>
+          </NavLink>
+          <NavLink to="/mcp/tokens" className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'} title={collapsed ? '凭据' : undefined}>
+            <IconKey /><span>凭据</span>
+          </NavLink>
         </div>
         <div className="sidebar-footer">
           <div className="footer-meta">
             <span>ccrouter</span>
-            {!collapsed && <span style={{ opacity: 0.5 }}>v0.6.1</span>}
+            {!collapsed && <span style={{ opacity: 0.5 }}>v0.7.0</span>}
           </div>
           {authRequired && (
             <button
@@ -224,10 +262,27 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Overview />} />
           <Route path="/requests" element={<Requests />} />
+          <Route path="/logs" element={<LogsPage />} />
           <Route path="/config" element={<ConfigEditor />} />
           <Route path="/test" element={<TestPage />} />
           <Route path="/info" element={<InfoPage />} />
-          <Route path="/logs" element={<LogsPage />} />
+          {/* Model route aliases */}
+          <Route path="/model" element={<Overview />} />
+          <Route path="/model/overview" element={<Overview />} />
+          <Route path="/model/requests" element={<Requests />} />
+          <Route path="/model/logs" element={<LogsPage />} />
+          <Route path="/model/config" element={<ConfigEditor />} />
+          <Route path="/model/test" element={<TestPage />} />
+          <Route path="/model/info" element={<InfoPage />} />
+          {/* MCP routes */}
+          <Route path="/mcp" element={<McpOverview />} />
+          <Route path="/mcp/overview" element={<McpOverview />} />
+          <Route path="/mcp/requests" element={<McpRequests />} />
+          <Route path="/mcp/logs" element={<McpLogs />} />
+          <Route path="/mcp/config" element={<McpConfig />} />
+          <Route path="/mcp/test" element={<McpTest />} />
+          <Route path="/mcp/info" element={<McpInfoPage />} />
+          <Route path="/mcp/tokens" element={<McpTokens />} />
         </Routes>
       </main>
     </div>

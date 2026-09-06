@@ -16,6 +16,7 @@ import (
 	"ccrouter/internal/config"
 	"ccrouter/internal/db"
 	"ccrouter/internal/keys"
+	mcpGateway "ccrouter/internal/mcp/gateway"
 	proxyPkg "ccrouter/internal/proxy"
 	"ccrouter/internal/report"
 )
@@ -30,6 +31,7 @@ type State struct {
 	service    *proxyPkg.Service
 	recorder   *db.Recorder
 	report     *report.Logger
+	mcp        *mcpGateway.Gateway
 }
 
 // New creates a State from config, building key managers and the proxy service.
@@ -38,11 +40,20 @@ func New(cfg *config.AppConfig, configPath string, rec *db.Recorder, rl *report.
 	if err != nil {
 		return nil, err
 	}
+
+	timeout := resolveTimeout(cfg)
+	mcpClients := buildMcpProviderClients(cfg, timeout)
+	mcpGw, err := mcpGateway.New(cfg, rec, mcpClients, cfg.General.ExternalURL)
+	if err != nil {
+		return nil, fmt.Errorf("init mcp gateway: %w", err)
+	}
+
 	return &State{
 		configPath: configPath,
 		service:    svc,
 		recorder:   rec,
 		report:     rl,
+		mcp:        mcpGw,
 	}, nil
 }
 
@@ -113,13 +124,7 @@ func buildProxyClient(globalProxy *config.ProxyConfig, providerProxy *config.Pro
 	return &http.Client{Transport: transport, Timeout: timeout}
 }
 
-func buildService(cfg *config.AppConfig, prevKMs map[string]*keys.Manager,
-	rec *db.Recorder, rl *report.Logger) (*proxyPkg.Service, error) {
-
-	// Resolve timeout from config:
-	//   0 (field omitted)                         -> defaultRequestTimeout (10 min)
-	//   config.RequestTimeoutDisabled (explicit 0) -> 0 (no timeout)
-	//   positive N                                 -> N seconds
+func resolveTimeout(cfg *config.AppConfig) time.Duration {
 	timeout := defaultRequestTimeout
 	switch {
 	case cfg.General.RequestTimeoutSeconds == config.RequestTimeoutDisabled:
@@ -127,6 +132,22 @@ func buildService(cfg *config.AppConfig, prevKMs map[string]*keys.Manager,
 	case cfg.General.RequestTimeoutSeconds > 0:
 		timeout = time.Duration(cfg.General.RequestTimeoutSeconds) * time.Second
 	}
+	return timeout
+}
+
+func buildMcpProviderClients(cfg *config.AppConfig, timeout time.Duration) map[string]*http.Client {
+	mcpClients := make(map[string]*http.Client, len(cfg.McpProviders))
+	for i := range cfg.McpProviders {
+		p := &cfg.McpProviders[i]
+		mcpClients[p.Name] = buildProxyClient(cfg.General.Proxy, p.Proxy, timeout)
+	}
+	return mcpClients
+}
+
+func buildService(cfg *config.AppConfig, prevKMs map[string]*keys.Manager,
+	rec *db.Recorder, rl *report.Logger) (*proxyPkg.Service, error) {
+
+	timeout := resolveTimeout(cfg)
 
 	// Build per-provider clients with proxy settings.
 	providerClients := make(map[string]*http.Client, len(cfg.Providers))
@@ -158,6 +179,13 @@ func (s *State) Service() *proxyPkg.Service {
 	return s.service
 }
 
+// MCP returns the current MCP gateway snapshot.
+func (s *State) MCP() *mcpGateway.Gateway {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.mcp
+}
+
 // Recorder returns the recorder.
 func (s *State) Recorder() *db.Recorder { return s.recorder }
 
@@ -187,7 +215,20 @@ func (s *State) Reload(newConfig *config.AppConfig) error {
 	if err != nil {
 		return err
 	}
+
+	timeout := resolveTimeout(newConfig)
+	mcpClients := buildMcpProviderClients(newConfig, timeout)
+	newMcp, err := mcpGateway.New(newConfig, s.recorder, mcpClients, newConfig.General.ExternalURL)
+	if err != nil {
+		return fmt.Errorf("rebuild mcp gateway: %w", err)
+	}
+
+	oldMcp := s.mcp
 	s.service = newSvc
+	s.mcp = newMcp
+	if oldMcp != nil {
+		oldMcp.Close()
+	}
 	return nil
 }
 
@@ -207,12 +248,15 @@ func (s *State) SaveAndReload(newConfig *config.AppConfig) error {
 	return s.Reload(newConfig)
 }
 
-// Close shuts down the recorder and report logger.
+// Close shuts down the recorder, report logger, and MCP gateway.
 func (s *State) Close() {
 	if s.recorder != nil {
 		s.recorder.Close()
 	}
 	if s.report != nil {
 		s.report.Close()
+	}
+	if s.mcp != nil {
+		s.mcp.Close()
 	}
 }

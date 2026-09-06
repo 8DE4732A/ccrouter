@@ -11,10 +11,13 @@
 - **两级重试** — 先在当前 Provider 内轮换密钥，密钥全部冷却后自动切换到 Combo 的下一个成员
 - **细粒度冷却** — 冷却粒度为 `(key, model)`，同一个 key 下不同模型的配额相互独立
 - **多格式支持** — 同时支持 OpenAI Chat、Anthropic Messages、OpenAI Responses、OpenAI Images、OpenAI Embeddings 五种 API 格式
+- **MCP 网关与工具路由** — 充当 Model Context Protocol (MCP) 聚合网关，支持 `stdio`、`sse`、`streamablehttp` 三种传输协议，灵活组合上游工具
+- **多用户隔离认证** — 下游聊天机器人通过 HTTP Header (`X-User-Id`) 标识用户，支持共享凭据及用户独立 OAuth 2.1 PKCE 授权，未授权返回标准 JSON-RPC `-32001`
 - **Payload 脚本** — 转发前执行脚本改写请求 body / header（基于 [expr-lang/expr](https://github.com/expr-lang/expr)，天然沙箱）
 - **Streaming** — 正确处理 SSE 流式响应，含 token usage 嗅探和首帧错误检测
-- **管理页面** — 内置 Web UI，支持单用户密码认证、实时统计、请求明细、热重载配置（`/admin/`）
+- **管理页面** — 内置 Web UI，支持单用户密码认证、实时统计、请求明细、MCP 状态与调试、热重载配置（`/admin/`）
 - **单二进制** — 前端静态资源通过 `go:embed` 内嵌，部署只需一个可执行文件
+
 
 ## 安装
 
@@ -87,6 +90,7 @@ SENSE_ROLL_CONFIG=/etc/ccrouter/config.yaml ./ccrouter
 | **请求** | 分页日志，含 combo / provider / model / key / 状态码 / token 用量 / matched_payload |
 | **配置** | 编辑 Provider 和 Combo，保存后热重载，无需重启 |
 | **测试** | 直接调用代理端点验证配置，支持流式展示、thinking 模式和图像生成 |
+| **MCP** | MCP 网关状态总览，支持 Provider 连通性与工具探测、Combo 虚拟聚合预览、下游多用户 OAuth Token 凭据管理 |
 | **日志** | 详细请求报文（需开启详细记录），可展开查看完整 client/upstream 请求与响应，支持配置存储路径、单文件大小、备份数与压缩等级 |
 | **信息** | 版本、Go 运行时、当前 Provider 和 Combo 列表 |
 
@@ -238,6 +242,57 @@ payload_scripts:
 
 脚本执行情况（名称 + `ok` 或错误摘要）写入请求记录的 `matched_payload` 字段，可在请求明细中查看。
 
+### MCP 网关与工具路由
+
+ccrouter 充当 Model Context Protocol (MCP) 聚合网关与工具路由中心，向下游聊天机器人提供统一的虚拟 MCP 入口：
+
+- **传输协议支持**：`stdio`（拉起并管理本地子进程）、`sse`（远程 Server-Sent Events 双向流）、`streamablehttp`（现代 Streamable HTTP POST）。
+- **工具虚拟聚合**：将多个上游 Provider 的工具、资源和 Prompt 聚合为一个统一 Combo，支持自定义前缀命名空间（如 `fs__read_file`）防止命名冲突，支持按工具列表精确白名单过滤。
+- **多用户隔离认证**：下游聊天机器人通过 HTTP Header（默认 `X-User-Id: <user_id>`）传递终端用户标识。
+  - **共享认证**：Provider 配置全局 API Key 或共享 Token，所有下游用户复用相同的上游凭据。
+  - **隔离认证 (`isolated: true`)**：每个终端用户各走独立的 OAuth 2.1 PKCE 授权流程，Token 安全持久化在本地 SQLite 中，并在使用前自动静默刷新。
+  - **解耦鉴权交互**：当用户调用未授权的隔离 Provider 工具时，ccrouter 返回标准 JSON-RPC 错误码 `-32001`（包含 `auth_url`、`provider`、`user_id`）并附带响应头 `X-MCP-Auth-Required: true`，下游机器人可无缝拦截该错误并引导用户授权。
+
+```yaml
+general:
+  external_url: "https://gateway.example.com" # 反代场景下的公开访问域名（用于 OAuth 回调与生成绝对鉴权链接）
+
+mcp_providers:
+  - name: fs
+    transport: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    timeout_seconds: 30
+
+  - name: gdrive
+    transport: streamablehttp
+    url: "https://mcp.example.com/gdrive"
+    timeout_seconds: 45
+    auth:
+      mode: oauth2
+      isolated: true                      # 开启用户隔离认证，OAuth 2.1 PKCE
+      client_id: "your-client-id"
+      client_secret: "your-client-secret"
+      auth_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      scopes: ["https://www.googleapis.com/auth/drive.readonly"]
+
+mcp_combos:
+  - name: "mytools"
+    user_id_header: "X-User-Id"           # 默认为 X-User-Id
+    members:
+      - provider: fs
+        prefix: "fs"
+      - provider: gdrive
+        prefix: "gdrive"
+```
+
+#### 信任模型与安全建议 (Trust Model & Security)
+
+- **网络边界**：`ccrouter` 设计为部署在私有受信网络或由可信中间层（如自有业务聊天机器人后端）调用的工具网关。
+- **用户身份隔离**：`X-User-Id` 由下游机器人后端在请求头中传入，网关负责依据该标识隔离存储与调度各用户的上游 OAuth 凭据。网关本身通过 `general.api_keys` 对下游机器人进行接入认证，下游机器人对终端最终用户的真实身份进行鉴权与校验。
+- **反代与域名配置**：生产环境下请在 `general.external_url` 配置对外访问网关地址（如 `https://mcp.yourdomain.com`），以确保 OAuth 授权回调与 `-32001` 错误中的 `auth_url` 为可点击的完整公网链接。
+
 ### Verbose Logging（详细日志）
 
 > ⚠️ **安全警告**：详细日志会完整记录 HTTP header，其中包含上游 Provider 的**明文 API 密钥**。`logs/` 目录已加入 `.gitignore`，请勿将其暴露至公网或提交至版本控制。
@@ -272,6 +327,16 @@ payload_scripts:
 | `GET/PUT /admin/api/logs/settings` | 查看/更新详细日志及存储配置 |
 | `GET /admin/api/info` | 版本、运行时、combo 和 provider 列表 |
 | `GET /admin/api/health` | 进程健康（含 DB 队列状态） |
+| `POST /mcp/:combo` | Streamable HTTP MCP 协议交互 |
+| `GET /mcp/:combo/sse` | SSE MCP 协议连接端点 |
+| `POST /mcp/:combo/message` | SSE MCP 协议上行消息通道 |
+| `GET /mcp/auth/start` | 发起下游用户 OAuth 2.1 授权重定向 |
+| `GET /mcp/auth/callback` | OAuth 2.1 授权回调处理 |
+| `GET /admin/api/mcp/providers` | 查看 MCP Provider 列表与状态 |
+| `POST /admin/api/mcp/providers/test` | 测试 MCP Provider 连通性与工具探测 |
+| `GET /admin/api/mcp/combos` | 查看 MCP Combo 虚拟聚合列表 |
+| `GET /admin/api/mcp/tokens` | 查看下游用户 Token 列表 |
+| `DELETE /admin/api/mcp/tokens/:id` | 撤销下游用户 Token |
 
 ## 使用示例
 
@@ -285,6 +350,18 @@ curl http://localhost:8000/v1/chat/completions \
 curl http://localhost:8000/v1/messages \
   -H "Content-Type: application/json" \
   -d '{"model":"fast","messages":[{"role":"user","content":"hello"}],"max_tokens":1024}'
+
+# MCP 工具列表调用（下游聊天机器人携带 X-User-Id）
+curl http://localhost:8000/mcp/mytools \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: alice" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
+
+# MCP 工具执行（若命中 isolated OAuth 且未授权，返回 -32001 与 X-MCP-Auth-Required 响应头）
+curl http://localhost:8000/mcp/mytools \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: alice" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fs__read_file","arguments":{"path":"test.txt"}}}'
 
 # 查看密钥状态
 curl http://localhost:8000/keys/status | jq .

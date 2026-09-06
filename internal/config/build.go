@@ -28,6 +28,8 @@ func asStringList(v any, ctx string) ([]string, error) {
 		return nil, nil
 	case string:
 		return []string{t}, nil
+	case []string:
+		return t, nil
 	case []any:
 		out := make([]string, 0, len(t))
 		for i, item := range t {
@@ -230,7 +232,6 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 		}
 	}
 
-
 	// ---- general ----
 	if v, ok := raw["general"]; ok && v != nil {
 		gm, err := asMap(v, "general")
@@ -286,6 +287,12 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 		// admin_password
 		if ap, ok := gm["admin_password"]; ok {
 			cfg.General.AdminPassword = strings.TrimSpace(strVal(ap))
+		}
+		// external_url (or base_url)
+		if eu, ok := gm["external_url"]; ok {
+			cfg.General.ExternalURL = strings.TrimRight(strings.TrimSpace(strVal(eu)), "/")
+		} else if bu, ok := gm["base_url"]; ok {
+			cfg.General.ExternalURL = strings.TrimRight(strings.TrimSpace(strVal(bu)), "/")
 		}
 	}
 
@@ -362,6 +369,46 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 				Enabled: toBoolDefault(sm["enabled"], true),
 				Script:  src,
 			})
+		}
+	}
+
+	// ---- mcp_providers ----
+	mcpProviderNames := map[string]bool{}
+	if v, ok := raw["mcp_providers"]; ok && v != nil {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, errf("'mcp_providers' must be a list")
+		}
+		for i, pv := range arr {
+			pm, err := asMap(pv, fmt.Sprintf("mcp_providers[%d]", i))
+			if err != nil {
+				return nil, err
+			}
+			p, err := buildMcpProvider(pm, i, mcpProviderNames)
+			if err != nil {
+				return nil, err
+			}
+			cfg.McpProviders = append(cfg.McpProviders, *p)
+		}
+	}
+
+	// ---- mcp_combos ----
+	mcpComboNames := map[string]bool{}
+	if v, ok := raw["mcp_combos"]; ok && v != nil {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, errf("'mcp_combos' must be a list")
+		}
+		for i, cv := range arr {
+			cm, err := asMap(cv, fmt.Sprintf("mcp_combos[%d]", i))
+			if err != nil {
+				return nil, err
+			}
+			c, err := buildMcpCombo(cm, i, mcpComboNames, mcpProviderNames)
+			if err != nil {
+				return nil, err
+			}
+			cfg.McpCombos = append(cfg.McpCombos, *c)
 		}
 	}
 
@@ -656,7 +703,6 @@ func buildCombo(c map[string]any, ctx string, providerMap map[string]*ProviderCo
 	return cc, nil
 }
 
-
 func formatsToConfig(f []string) any {
 	if len(f) == 1 {
 		return f[0]
@@ -712,4 +758,311 @@ func stringDefault(s, def string) string {
 		return def
 	}
 	return s
+}
+
+var knownMcpProviderKeys = map[string]bool{
+	"name": true, "transport": true, "command": true, "args": true,
+	"env": true, "working_dir": true, "url": true, "headers": true,
+	"timeout_seconds": true, "auth_mode": true, "auth": true, "proxy": true,
+}
+
+var knownMcpAuthKeys = map[string]bool{
+	"mode": true, "type": true, "isolated": true, "api_key": true,
+	"header": true, "header_name": true, "header_value": true, "key": true,
+	"client_id": true, "client_secret": true,
+	"auth_url": true, "authorization_url": true, "token_url": true,
+	"scopes": true, "redirect_url": true,
+}
+
+var knownMcpComboKeys = map[string]bool{
+	"name": true, "owned_by": true, "description": true,
+	"user_id_header": true, "members": true,
+}
+
+var knownMcpComboMemberKeys = map[string]bool{
+	"provider": true, "prefix": true, "tools": true,
+	"resources": true, "prompts": true,
+}
+
+func buildMcpProvider(pm map[string]any, idx int, providerNames map[string]bool) (*McpProviderConfig, error) {
+	for k := range pm {
+		if !knownMcpProviderKeys[k] {
+			return nil, errf("mcp_providers[%d]: unknown key %q", idx, k)
+		}
+	}
+
+	name := strings.TrimSpace(strVal(pm["name"]))
+	if name == "" {
+		return nil, errf("mcp_providers[%d].name must not be empty", idx)
+	}
+	if providerNames[name] {
+		return nil, errf("duplicate mcp provider name %q", name)
+	}
+	transport := lower(strVal(pm["transport"]))
+	if transport != "stdio" && transport != "sse" && transport != "streamablehttp" {
+		return nil, errf("mcp_providers[%d].transport must be one of: stdio, sse, streamablehttp", idx)
+	}
+
+	timeoutSec := 30
+	if tv, ok := pm["timeout_seconds"]; ok {
+		timeoutSec = intDefault(tv, 30)
+		if timeoutSec <= 0 {
+			return nil, errf("mcp_providers[%d].timeout_seconds must be > 0, got %d", idx, timeoutSec)
+		}
+	}
+
+	p := &McpProviderConfig{
+		Name:           name,
+		Transport:      transport,
+		TimeoutSeconds: timeoutSec,
+	}
+
+	if transport == "stdio" {
+		cmd := strings.TrimSpace(strVal(pm["command"]))
+		if cmd == "" {
+			return nil, errf("mcp_providers[%d].command is required for stdio transport", idx)
+		}
+		p.Command = cmd
+		if av, ok := pm["args"]; ok {
+			args, err := asStringList(av, fmt.Sprintf("mcp_providers[%d].args", idx))
+			if err != nil {
+				return nil, err
+			}
+			p.Args = args
+		}
+		if ev, ok := pm["env"].(map[string]any); ok {
+			env := make(map[string]string, len(ev))
+			for k, v := range ev {
+				env[k] = strVal(v)
+			}
+			p.Env = env
+		}
+		p.WorkingDir = strings.TrimSpace(strVal(pm["working_dir"]))
+	} else {
+		// sse or streamablehttp
+		u := strings.TrimSpace(strVal(pm["url"]))
+		if u == "" {
+			return nil, errf("mcp_providers[%d].url is required for %s transport", idx, transport)
+		}
+		p.URL = u
+		if hv, ok := pm["headers"].(map[string]any); ok {
+			headers := make(map[string]string, len(hv))
+			for k, v := range hv {
+				headers[k] = strVal(v)
+			}
+			p.Headers = headers
+		}
+	}
+
+	authMode := lower(strVal(pm["auth_mode"]))
+	var av map[string]any
+	if rawAuth, ok := pm["auth"]; ok && rawAuth != nil {
+		authMap, err := asMap(rawAuth, fmt.Sprintf("mcp_providers[%d].auth", idx))
+		if err != nil {
+			return nil, err
+		}
+		av = authMap
+		for k := range av {
+			if !knownMcpAuthKeys[k] {
+				return nil, errf("mcp_providers[%d].auth: unknown key %q", idx, k)
+			}
+		}
+		// If auth.isolated is specified, it takes precedence
+		if isVal, hasIsolated := av["isolated"]; hasIsolated {
+			if toBool(isVal) {
+				authMode = "isolated"
+			} else {
+				authMode = "shared"
+			}
+		}
+	}
+
+	if authMode == "" {
+		authMode = "shared"
+	}
+	if authMode != "shared" && authMode != "isolated" {
+		return nil, errf("mcp_providers[%d].auth_mode must be 'shared' or 'isolated'", idx)
+	}
+	p.AuthMode = authMode
+
+	if len(av) > 0 {
+		authModeType := lower(strVal(av["mode"]))
+		if authModeType == "" {
+			authModeType = lower(strVal(av["type"]))
+		}
+		if authModeType == "" {
+			authModeType = "none"
+		}
+		if authModeType != "none" && authModeType != "api_key" && authModeType != "oauth2" {
+			return nil, errf("mcp_providers[%d].auth.mode must be one of: none, api_key, oauth2, got %q", idx, authModeType)
+		}
+
+		// Validation (#9): oauth2 must be used with isolated auth mode
+		if authModeType == "oauth2" && authMode != "isolated" {
+			return nil, errf("mcp_providers[%d].auth: oauth2 authentication requires isolated=true (or auth_mode: \"isolated\")", idx)
+		}
+
+		ac := &McpAuthConfig{
+			Mode:     authModeType,
+			Type:     authModeType,
+			Isolated: (authMode == "isolated"),
+		}
+		switch authModeType {
+		case "api_key":
+			key := strings.TrimSpace(strVal(av["api_key"]))
+			if key == "" {
+				key = strings.TrimSpace(strVal(av["header_value"]))
+			}
+			if key == "" {
+				key = strings.TrimSpace(strVal(av["key"]))
+			}
+			if key == "" {
+				return nil, errf("mcp_providers[%d].auth.api_key must not be empty", idx)
+			}
+			ac.APIKey = key
+			hdr := strings.TrimSpace(strVal(av["header"]))
+			if hdr == "" {
+				hdr = strings.TrimSpace(strVal(av["header_name"]))
+			}
+			ac.Header = stringDefault(hdr, "Authorization")
+		case "oauth2":
+			clientID := strings.TrimSpace(strVal(av["client_id"]))
+			if clientID == "" {
+				return nil, errf("mcp_providers[%d].auth.client_id must not be empty", idx)
+			}
+			ac.ClientID = clientID
+			ac.ClientSecret = strings.TrimSpace(strVal(av["client_secret"]))
+
+			authURL := strings.TrimSpace(strVal(av["auth_url"]))
+			if authURL == "" {
+				authURL = strings.TrimSpace(strVal(av["authorization_url"]))
+			}
+			if authURL == "" {
+				return nil, errf("mcp_providers[%d].auth.auth_url must not be empty", idx)
+			}
+			ac.AuthURL = authURL
+			ac.AuthorizationURL = authURL
+
+			tokenURL := strings.TrimSpace(strVal(av["token_url"]))
+			if tokenURL == "" {
+				return nil, errf("mcp_providers[%d].auth.token_url must not be empty", idx)
+			}
+			ac.TokenURL = tokenURL
+
+			if sv, ok := av["scopes"]; ok {
+				scopes, err := asStringList(sv, fmt.Sprintf("mcp_providers[%d].auth.scopes", idx))
+				if err != nil {
+					return nil, err
+				}
+				ac.Scopes = scopes
+			}
+			ac.RedirectURL = strings.TrimSpace(strVal(av["redirect_url"]))
+		}
+		p.Auth = ac
+	}
+
+	if pv, ok := pm["proxy"]; ok && pv != nil {
+		pxm, err := asMap(pv, fmt.Sprintf("mcp_providers[%d].proxy", idx))
+		if err != nil {
+			return nil, err
+		}
+		p.Proxy = &ProxyConfig{
+			URL:      strings.TrimSpace(strVal(pxm["url"])),
+			Disabled: toBool(pxm["disabled"]),
+		}
+	}
+
+	providerNames[name] = true
+	return p, nil
+}
+
+func buildMcpCombo(cm map[string]any, idx int, comboNames map[string]bool, mcpProviderNames map[string]bool) (*McpComboConfig, error) {
+	for k := range cm {
+		if !knownMcpComboKeys[k] {
+			return nil, errf("mcp_combos[%d]: unknown key %q", idx, k)
+		}
+	}
+
+	name := strings.TrimSpace(strVal(cm["name"]))
+	if name == "" {
+		return nil, errf("mcp_combos[%d].name must not be empty", idx)
+	}
+	if strings.Contains(name, "/") {
+		return nil, errf("mcp_combos[%d].name %q must not contain '/'", idx, name)
+	}
+	if comboNames[name] {
+		return nil, errf("duplicate mcp combo name %q", name)
+	}
+
+	cc := &McpComboConfig{
+		Name:         name,
+		OwnedBy:      strings.TrimSpace(strVal(cm["owned_by"])),
+		Description:  strings.TrimSpace(strVal(cm["description"])),
+		UserIDHeader: stringDefault(strings.TrimSpace(strVal(cm["user_id_header"])), "X-User-Id"),
+	}
+
+	membersRaw, ok := cm["members"].([]any)
+	if !ok || len(membersRaw) == 0 {
+		return nil, errf("mcp_combos[%d] must contain at least one member", idx)
+	}
+
+	for mi, mv := range membersRaw {
+		mm, err := asMap(mv, fmt.Sprintf("mcp_combos[%d].members[%d]", idx, mi))
+		if err != nil {
+			return nil, err
+		}
+		for k := range mm {
+			if !knownMcpComboMemberKeys[k] {
+				return nil, errf("mcp_combos[%d].members[%d]: unknown key %q", idx, mi, k)
+			}
+		}
+
+		prov := strings.TrimSpace(strVal(mm["provider"]))
+		if prov == "" {
+			return nil, errf("mcp_combos[%d].members[%d].provider must not be empty", idx, mi)
+		}
+		if !mcpProviderNames[prov] {
+			return nil, errf("mcp_combos[%d].members[%d]: unknown provider %q", idx, mi, prov)
+		}
+
+		member := McpComboMemberConfig{
+			Provider: prov,
+			Prefix:   strings.TrimSpace(strVal(mm["prefix"])),
+		}
+
+		if tv, ok := mm["tools"]; ok {
+			tools, err := asStringList(tv, fmt.Sprintf("mcp_combos[%d].members[%d].tools", idx, mi))
+			if err != nil {
+				return nil, err
+			}
+			member.Tools = tools
+		} else {
+			member.Tools = []string{"*"}
+		}
+
+		if rv, ok := mm["resources"]; ok {
+			res, err := asStringList(rv, fmt.Sprintf("mcp_combos[%d].members[%d].resources", idx, mi))
+			if err != nil {
+				return nil, err
+			}
+			member.Resources = res
+		} else {
+			member.Resources = []string{"*"}
+		}
+
+		if pv, ok := mm["prompts"]; ok {
+			prompts, err := asStringList(pv, fmt.Sprintf("mcp_combos[%d].members[%d].prompts", idx, mi))
+			if err != nil {
+				return nil, err
+			}
+			member.Prompts = prompts
+		} else {
+			member.Prompts = []string{"*"}
+		}
+
+		cc.Members = append(cc.Members, member)
+	}
+
+	comboNames[name] = true
+	return cc, nil
 }

@@ -204,3 +204,73 @@ payload_scripts:
       combo == "fast" && "thinking" in body
         ? setpath(body, "thinking", "budget_tokens", clamp(get(body.thinking, "budget_tokens", 8000), 0, 1024))
         : nil
+
+# ---------------------------------------------------------------------------
+# MCP 网关与工具路由配置（可选）
+# ccrouter 支持充当 MCP 聚合网关，支持 stdio、sse、streamablehttp 三种传输协议，
+# 支持组合多个上游 MCP Provider 到统一 Combo，并支持下游机器人多用户独立/共享认证。
+# ---------------------------------------------------------------------------
+mcp_providers:
+  # -----------------------------------------------------------------------
+  # 1. 本地 Stdio Provider（本地进程管理）
+  # -----------------------------------------------------------------------
+  - name: "fs-local"
+    transport: "stdio"
+    command: "npx"
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+    env:
+      NODE_ENV: "production"
+    timeout_seconds: 30
+
+  # -----------------------------------------------------------------------
+  # 2. 远程 SSE Provider（共享 API Key 认证）
+  # -----------------------------------------------------------------------
+  - name: "github-tools"
+    transport: "sse"
+    url: "https://api.example.com/mcp/github/sse"
+    timeout_seconds: 30
+    auth:
+      mode: "api_key"
+      api_key: "ghp_xxxxxxxxxxxx"
+      header: "Authorization"
+
+  # -----------------------------------------------------------------------
+  # 3. 远程 Streamable HTTP Provider（下游多用户独立 OAuth 2.1 PKCE 认证）
+  # 当下游用户未完成 OAuth 授权时，调用时返回 JSON-RPC -32001 (CodeAuthRequired)
+  # -----------------------------------------------------------------------
+  - name: "google-drive"
+    transport: "streamablehttp"
+    url: "https://mcp.example.com/gdrive"
+    timeout_seconds: 45
+    auth:
+      mode: "oauth2"
+      isolated: true                      # 隔离认证：不同用户各走独立 token
+      client_id: "your-client-id"
+      client_secret: "your-client-secret"
+      auth_url: "https://accounts.google.com/o/oauth2/v2/auth"
+      token_url: "https://oauth2.googleapis.com/token"
+      scopes:
+        - "https://www.googleapis.com/auth/drive.readonly"
+      redirect_url: "http://localhost:8000/mcp/auth/callback"
+
+mcp_combos:
+  # -----------------------------------------------------------------------
+  # 统一对外暴露的虚拟 MCP Combo
+  # 客户端通过 POST /mcp/assistant 或 GET /mcp/assistant/sse 连接
+  # 下游聊天机器人通过 HTTP Header (如 X-User-Id: alice) 传递终端用户标识
+  # -----------------------------------------------------------------------
+  - name: "assistant"
+    description: "聚合本地文件管理与云端协作工具的统一 MCP 入口"
+    user_id_header: "X-User-Id"           # 提取用户标识的 HTTP Header，默认 X-User-Id
+    members:
+      - provider: "fs-local"
+        prefix: "fs"                      # 工具添加命名空间前缀，如 fs__read_file
+        tools:                            # 过滤指定工具；留空或省略表示包含全部
+          - "read_file"
+          - "list_directory"
+      - provider: "github-tools"
+        prefix: "gh"                      # 如 gh__create_issue
+        tools: ["*"]                      # 通配符全部
+      - provider: "google-drive"
+        prefix: "gdrive"
+

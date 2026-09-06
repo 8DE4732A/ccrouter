@@ -30,6 +30,13 @@ verbose_logging:     [bool, default=false]
 payload_scripts:     [list[PayloadScript], default=[]]
                      # 转发前按顺序执行的 expr 脚本列表；disabled 脚本自动跳过
 
+mcp_providers:       [list[McpProviderConfig], default=[]]
+                     # 上游 MCP 服务提供方列表，支持 stdio、sse、streamablehttp 传输协议
+
+mcp_combos:          [list[McpComboConfig], default=[]]
+                     # 对外暴露的虚拟 MCP 组合网关，支持聚合多 Provider 工具及下游多用户隔离认证
+
+
 
 # ===========================================================================
 # ProviderConfig
@@ -226,6 +233,8 @@ GeneralConfig:
                            # 上游请求总超时时间（秒）；0 表示禁用超时（无限等待）
   admin_password:          [string, default=""]
                            # 管理控制台（Web UI 及 /admin/api/*）登录密码；若未配置或为空则无需认证
+  external_url:            [string, default=""]
+                           # 网关对外公开 Base URL（如 https://gateway.example.com）；用于反代环境下拼装完整可点击的 OAuth 授权链接与回调地址
 
 # ===========================================================================
 # LoggingConfig
@@ -247,6 +256,64 @@ LoggingConfig:
                            # zstd 压缩等级：fastest | default | better | best
 
 # ===========================================================================
+# McpProviderConfig
+# ===========================================================================
+# 上游 Model Context Protocol (MCP) 服务提供方配置。
+# 支持 stdio、sse 以及 streamablehttp 三种传输方式。
+
+McpProviderConfig:
+  name:                    <string>                  # 唯一标识符，供 mcp_combos.members 引用
+  transport:               <stdio | sse | streamablehttp> # 传输协议类型
+  command:                 [string]                  # stdio 模式下的启动命令（如 npx, python, node）
+  args:                    [list[string], default=[]] # stdio 模式下的命令行参数
+  env:                     [map[string]string, default={}] # stdio 进程环境变量
+  url:                     [string]                  # sse 或 streamablehttp 模式下的上游 URL
+  timeout_seconds:         [int, default=30]         # 请求与握手超时时间（秒）
+  auth:                    [McpAuthConfig, default=null] # 上游认证配置
+
+# ===========================================================================
+# McpAuthConfig
+# ===========================================================================
+# MCP Provider 的认证凭据配置。支持共享认证（全局 API Key / OAuth Token）
+# 与下游多用户独立认证（用户独立 OAuth 2.1 PKCE 鉴权流程）。
+
+McpAuthConfig:
+  mode:                    <none | api_key | oauth2> # 认证模式
+  isolated:                [bool, default=false]     # 是否开启用户隔离模式。若为 true，不同下游用户独立存储 Token；调用时缺少凭据返回 -32001
+  api_key:                 [string]                  # api_key 模式下的密钥
+  header:                  [string, default="Authorization"] # 自定义认证 Header 名
+  client_id:               [string]                  # oauth2 模式下的客户端 ID
+  client_secret:           [string]                  # oauth2 模式下的客户端密钥
+  auth_url:                [string]                  # oauth2 授权端点
+  token_url:               [string]                  # oauth2 换取/刷新 Token 端点
+  scopes:                  [list[string], default=[]] # oauth2 请求 Scope
+  redirect_url:            [string]                  # oauth2 回调重定向 URL，通常为 /mcp/auth/callback
+
+# ===========================================================================
+# McpComboConfig
+# ===========================================================================
+# 对外统一暴露的虚拟 MCP 组合网关。将多个上游 Provider 的工具/资源/Prompt
+# 聚合为一个整体，并对工具名等进行前缀隔离，提供统一的下游访问端点。
+
+McpComboConfig:
+  name:                    <string>                  # 组合名称，对外暴露为 /mcp/:combo 及 /mcp/:combo/sse
+  description:             [string, default=""]      # 对此组合的功能描述
+  user_id_header:          [string, default="X-User-Id"] # 提取下游终端用户标识的 HTTP Header
+  members:                 <list[McpComboMemberConfig]> # 聚合的上游 Provider 成员列表
+
+# ===========================================================================
+# McpComboMemberConfig
+# ===========================================================================
+# 组合网关成员配置。
+
+McpComboMemberConfig:
+  provider:                <string>                  # 引用的 mcp_providers 中的 name
+  prefix:                  [string, default=""]      # 工具、资源及 Prompt 的前缀（如 fs__read_file）
+  tools:                   [list[string], default=[]] # 导出的工具列表白名单；留空或包含 "*" 表示全部导出
+  resources:               [list[string], default=[]] # 导出的资源列表白名单；留空表示全部导出
+  prompts:                 [list[string], default=[]] # 导出的 Prompt 列表白名单；留空表示全部导出
+
+# ===========================================================================
 # 端点 → api_format 对应表（客户端）
 # ===========================================================================
 #
@@ -257,20 +324,33 @@ LoggingConfig:
 #   POST /v1/images/edits      ←→  openai-image-edits
 #   POST /v1/embeddings        ←→  openai-embeddings
 #
-# GET  /v1/models                  可用模型列表（OpenAI 兼容格式）
-# GET  /health                     健康检查
-# GET  /keys/status                实时 key 池状态（含冷却信息）
-# GET  /admin/                     管理页面
-# GET  /admin/api/auth/status      管理认证状态查询
-# POST /admin/api/auth/login       管理员登录
-# POST /admin/api/auth/logout      管理员登出
-# GET  /admin/api/config           查看/编辑配置（热重载）
-# GET  /admin/api/stats/keys       key 状态统计
-# GET  /admin/api/stats/summary    聚合统计（按 combo/provider/model 分组）
-# GET  /admin/api/stats/trend      时间趋势（按小时/天分桶）
-# GET  /admin/api/requests         请求明细列表
-# GET  /admin/api/info             运行时信息（版本、combo/provider 列表）
-# GET  /admin/api/health           服务健康状态
-# GET  /admin/api/logs             详细请求报文（需开启 logging.enabled 或 verbose_logging）
-# GET  /admin/api/logs/settings    查看详细日志配置
-# PUT  /admin/api/logs/settings    动态切换详细记录及配置存储参数
+# MCP (Model Context Protocol) 聚合网关端点：
+#   POST /mcp/:combo           ←→  Streamable HTTP MCP 协议交互
+#   GET  /mcp/:combo/sse       ←→  SSE MCP 协议长连接监听端点
+#   POST /mcp/:combo/message   ←→  SSE MCP 协议消息上行投递
+#   GET  /mcp/auth/start       ←→  发起下游用户 OAuth 2.1 授权流程
+#   GET  /mcp/auth/callback    ←→  处理 OAuth 2.1 授权码回调
+#
+# 管理端 API 端点：
+#   GET  /v1/models                  可用模型列表（OpenAI 兼容格式）
+#   GET  /health                     健康检查
+#   GET  /keys/status                实时 key 池状态（含冷却信息）
+#   GET  /admin/                     管理页面
+#   GET  /admin/api/auth/status      管理认证状态查询
+#   POST /admin/api/auth/login       管理员登录
+#   POST /admin/api/auth/logout      管理员登出
+#   GET  /admin/api/config           查看/编辑配置（热重载）
+#   GET  /admin/api/stats/keys       key 状态统计
+#   GET  /admin/api/stats/summary    聚合统计（按 combo/provider/model 分组）
+#   GET  /admin/api/stats/trend      时间趋势（按小时/天分桶）
+#   GET  /admin/api/requests         请求明细列表
+#   GET  /admin/api/info             运行时信息（版本、combo/provider 列表）
+#   GET  /admin/api/health           服务健康状态
+#   GET  /admin/api/logs             详细请求报文（需开启 logging.enabled 或 verbose_logging）
+#   GET  /admin/api/logs/settings    查看详细日志配置
+#   PUT  /admin/api/logs/settings    动态切换详细记录及配置存储参数
+#   GET  /admin/api/mcp/providers    查看 MCP Provider 列表及运行时状态
+#   POST /admin/api/mcp/providers/test 测试上游 MCP Provider 连通性并拉取工具列表
+#   GET  /admin/api/mcp/combos       查看 MCP Combo 网关聚合状态
+#   GET  /admin/api/mcp/tokens       查看下游用户 OAuth Token 凭据列表
+#   DELETE /admin/api/mcp/tokens/:id 撤销/删除指定的下游用户 Token
