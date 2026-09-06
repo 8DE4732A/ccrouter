@@ -1,5 +1,9 @@
 # ccrouter
 
+<p align="center">
+  <img src="assets/poster.png" alt="ccrouter" width="480" />
+</p>
+
 多 Provider AI API 网关，用 Go 实现。支持 Combo 路由、密钥轮换、健康检查规则和管理界面。
 
 当上游返回配额超限等指定错误时，自动轮换密钥或切换到备用 Provider，对客户端完全透明。
@@ -10,7 +14,7 @@
 - **Combo 路由** — 将一个虚拟模型名映射到多个 `(provider, model)` 成员，按策略依次尝试
 - **两级重试** — 先在当前 Provider 内轮换密钥，密钥全部冷却后自动切换到 Combo 的下一个成员
 - **细粒度冷却** — 冷却粒度为 `(key, model)`，同一个 key 下不同模型的配额相互独立
-- **多格式支持** — 同时支持 OpenAI Chat、Anthropic Messages、OpenAI Responses、OpenAI Images、OpenAI Embeddings 五种 API 格式
+- **多格式支持** — 同时支持 OpenAI Chat、Anthropic Messages、Google Gemini、OpenAI Responses、OpenAI Images、OpenAI Embeddings 六种 API 格式
 - **MCP 网关与工具路由** — 充当 Model Context Protocol (MCP) 聚合网关，支持 `stdio`、`sse`、`streamablehttp` 三种传输协议，灵活组合上游工具
 - **多用户隔离认证** — 下游聊天机器人通过 HTTP Header (`X-User-Id`) 标识用户，支持共享凭据及用户独立 OAuth 2.1 PKCE 授权，未授权返回标准 JSON-RPC `-32001`
 - **Payload 脚本** — 转发前执行脚本改写请求 body / header（基于 [expr-lang/expr](https://github.com/expr-lang/expr)，天然沙箱）
@@ -313,7 +317,9 @@ mcp_combos:
 | `POST /v1/images/generations` | OpenAI Image Generations（格式：`openai-images`） |
 | `POST /v1/images/edits` | OpenAI Image Edits（格式：`openai-image-edits`，配置 `openai-images` 时自动支持） |
 | `POST /v1/embeddings` | OpenAI Embeddings（格式：`openai-embeddings`） |
+| `POST /v1beta/models/*` | Google Gemini API（支持 `generateContent`、`streamGenerateContent`，格式：`gemini`） |
 | `GET /v1/models` | 返回所有可用 combo（含 alias），OpenAI 兼容格式 |
+| `GET /v1beta/models` | 返回支持 Gemini 格式的可用模型列表，Gemini 兼容格式 |
 | `GET /health` | 健康检查 |
 | `GET /keys/status` | 实时密钥池状态 |
 | `GET /admin/` | 管理页面 |
