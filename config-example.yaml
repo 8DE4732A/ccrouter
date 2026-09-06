@@ -142,6 +142,18 @@ combos:
           - provider: sensenova
             model: "text-embedding-3-small"
 
+      # -------------------------------------------------------------------
+      # Gemini API 格式 combo：下游各类 Gemini SDK 通过 /v1beta/models/... 调用
+      # 可自动将 Gemini 请求转为 OpenAI、Anthropic 等上游格式
+      # -------------------------------------------------------------------
+      - name: "gemini-flash"
+        api_format: [gemini, openai]
+        strategy: "fill-first"
+        members:
+          - provider: sensenova
+            model: "deepseek-v4-flash"
+            upstream_api_format: openai
+
   # =======================================================================
   # 自定义命名空间分组（如 team-a）
   # 客户端请求必须使用 <owned_by>/<combo_name> 进行区分，如 model="team-a/fast"

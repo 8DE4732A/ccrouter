@@ -1212,3 +1212,397 @@ combos:
 		t.Fatalf("expected 200 from PATCH /admin/api/config, got %d: %s", w.Code, w.Body.String())
 	}
 }
+
+func TestGeminiEndpoints(t *testing.T) {
+	// Mock upstream OpenAI server
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req map[string]any
+		_ = json.Unmarshal(body, &req)
+
+		// Check if request is streaming
+		if isStream, _ := req["stream"].(bool); isStream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":12345,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello from Gemini\"},\"finish_reason\":null}]}\n\n"))
+			flusher.Flush()
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":12345,\"model\":\"gpt-4o\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+			flusher.Flush()
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			flusher.Flush()
+			return
+		}
+
+		// Non-streaming response
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		resp := map[string]any{
+			"id":      "chatcmpl-123",
+			"object":  "chat.completion",
+			"created": 1677652288,
+			"model":   "gpt-4o",
+			"choices": []map[string]any{
+				{
+					"index": 0,
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": "Hello from upstream OpenAI!",
+					},
+					"finish_reason": "stop",
+				},
+			},
+			"usage": map[string]any{
+				"prompt_tokens":     10,
+				"completion_tokens": 15,
+				"total_tokens":      25,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockUpstream.Close()
+
+	yamlCfg := fmt.Sprintf(`
+general:
+  api_keys:
+    - key: test-gemini-key
+providers:
+  - name: mock-openai
+    api:
+      - api_format: openai
+        base_url: "%s/v1"
+    keys:
+      - key: sk-upstream-key
+    health_check_rules: []
+combos:
+  - name: gemini-chat
+    api_format: gemini
+    strategy: fill-first
+    members:
+      - provider: mock-openai
+        model: gpt-4o
+        upstream_api_format: openai
+`, mockUpstream.URL)
+
+	st, _ := newTestStateWithYAML(t, yamlCfg)
+	r := Router(st)
+
+	// 1. Test GET /v1beta/models without auth -> 401
+	w := doGET(t, r, "/v1beta/models")
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+	var errResp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &errResp)
+	if _, ok := errResp["error"].(map[string]any); !ok {
+		t.Fatalf("expected gemini error object, got %s", w.Body.String())
+	}
+
+	// 2. Test GET /v1beta/models with ?key= -> 200
+	req := httptest.NewRequest("GET", "/v1beta/models?key=test-gemini-key", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var modelsResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &modelsResp); err != nil {
+		t.Fatal(err)
+	}
+	models, ok := modelsResp["models"].([]any)
+	if !ok || len(models) == 0 {
+		t.Fatalf("expected non-empty models array, got %#v", modelsResp)
+	}
+	firstModel := models[0].(map[string]any)
+	if firstModel["name"] != "models/gemini-chat" {
+		t.Fatalf("expected models/gemini-chat, got %v", firstModel["name"])
+	}
+	methods, _ := firstModel["supportedGenerationMethods"].([]any)
+	for _, m := range methods {
+		if m == "countTokens" {
+			t.Fatalf("expected countTokens to NOT be in supportedGenerationMethods, got %#v", methods)
+		}
+	}
+
+	// 3. Test GET /v1beta/models/gemini-chat with x-goog-api-key -> 200
+	req = httptest.NewRequest("GET", "/v1beta/models/gemini-chat", nil)
+	req.Header.Set("x-goog-api-key", "test-gemini-key")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 4. Test GET /v1beta/models/unknown-model -> 404
+	req = httptest.NewRequest("GET", "/v1beta/models/unknown-model?key=test-gemini-key", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 5. Test POST /v1beta/models/gemini-chat:generateContent (Non-streaming)
+	geminiReqBody := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "Hello, can you help me?"}]}
+		]
+	}`)
+	req = httptest.NewRequest("POST", "/v1beta/models/gemini-chat:generateContent", bytes.NewReader(geminiReqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", "test-gemini-key")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var genResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &genResp); err != nil {
+		t.Fatal(err)
+	}
+	candidates, ok := genResp["candidates"].([]any)
+	if !ok || len(candidates) == 0 {
+		t.Fatalf("expected candidates in Gemini response, got %s", w.Body.String())
+	}
+	cand0 := candidates[0].(map[string]any)
+	content := cand0["content"].(map[string]any)
+	parts := content["parts"].([]any)
+	part0 := parts[0].(map[string]any)
+	if part0["text"] != "Hello from upstream OpenAI!" {
+		t.Fatalf("expected translated content 'Hello from upstream OpenAI!', got %v", part0["text"])
+	}
+
+	// 6. Test POST /v1beta/models/gemini-chat:streamGenerateContent?alt=sse (Streaming)
+	req = httptest.NewRequest("POST", "/v1beta/models/gemini-chat:streamGenerateContent?alt=sse&key=test-gemini-key", bytes.NewReader(geminiReqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for stream, got %d: %s", w.Code, w.Body.String())
+	}
+	respStr := w.Body.String()
+	if !strings.Contains(respStr, "data:") {
+		t.Fatalf("expected SSE stream with 'data:', got %s", respStr)
+	}
+	if !strings.Contains(respStr, "Hello from Gemini") {
+		t.Fatalf("expected streamed text 'Hello from Gemini', got %s", respStr)
+	}
+
+	// 7. Test POST /models/gemini-chat:generateContent (alternative path)
+	req = httptest.NewRequest("POST", "/models/gemini-chat:generateContent", bytes.NewReader(geminiReqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-gemini-key")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 for /models/ path, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 8. Test POST /v1beta/models/gemini-chat:generateContent with unknown combo
+	req = httptest.NewRequest("POST", "/v1beta/models/nonexistent:generateContent?key=test-gemini-key", bytes.NewReader(geminiReqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for unknown combo, got %d: %s", w.Code, w.Body.String())
+	}
+	var badResp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &badResp)
+	if _, ok := badResp["error"].(map[string]any); !ok {
+		t.Fatalf("expected Gemini error JSON, got %s", w.Body.String())
+	}
+
+	// 9. Test POST /v1beta/models/gemini-chat:countTokens -> 501 UNIMPLEMENTED
+	req = httptest.NewRequest("POST", "/v1beta/models/gemini-chat:countTokens?key=test-gemini-key", bytes.NewReader(geminiReqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("expected 501 for countTokens, got %d: %s", w.Code, w.Body.String())
+	}
+	var notImplResp map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &notImplResp)
+	errObj, ok := notImplResp["error"].(map[string]any)
+	if !ok || errObj["status"] != "UNIMPLEMENTED" {
+		t.Fatalf("expected UNIMPLEMENTED status, got %#v", notImplResp)
+	}
+}
+
+func TestGeminiToAnthropicTranslation(t *testing.T) {
+	mockAnthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		resp := map[string]any{
+			"id":    "msg_123",
+			"type":  "message",
+			"role":  "assistant",
+			"model": "claude-3-5-sonnet",
+			"content": []map[string]any{
+				{
+					"type": "text",
+					"text": "Hello from upstream Claude!",
+				},
+			},
+			"stop_reason": "end_turn",
+			"usage": map[string]any{
+				"input_tokens":  12,
+				"output_tokens": 8,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockAnthropic.Close()
+
+	yamlCfg := fmt.Sprintf(`
+providers:
+  - name: mock-claude
+    api:
+      - api_format: anthropic
+        base_url: "%s/v1"
+    keys:
+      - key: sk-upstream-claude
+    health_check_rules: []
+combos:
+  - name: gemini-to-claude
+    api_format: gemini
+    strategy: fill-first
+    members:
+      - provider: mock-claude
+        model: claude-3-5-sonnet
+        upstream_api_format: anthropic
+`, mockAnthropic.URL)
+
+	st, _ := newTestStateWithYAML(t, yamlCfg)
+	r := Router(st)
+
+	geminiReqBody := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "Hello Claude via Gemini SDK"}]}
+		]
+	}`)
+	req := httptest.NewRequest("POST", "/v1beta/models/gemini-to-claude:generateContent", bytes.NewReader(geminiReqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	t.Logf("Response body: %s", w.Body.String())
+	var genResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &genResp); err != nil {
+		t.Fatal(err)
+	}
+	candidates, ok := genResp["candidates"].([]any)
+	if !ok || len(candidates) == 0 {
+		t.Fatalf("expected candidates in Gemini response, got %s", w.Body.String())
+	}
+	cand0 := candidates[0].(map[string]any)
+	content := cand0["content"].(map[string]any)
+	parts := content["parts"].([]any)
+	part0 := parts[0].(map[string]any)
+	if part0["text"] != "Hello from upstream Claude!" {
+		t.Fatalf("expected 'Hello from upstream Claude!', got %v", part0["text"])
+	}
+}
+
+func TestGeminiToAnthropicTranslationToolUse(t *testing.T) {
+	mockAnthropic := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		resp := map[string]any{
+			"id":    "msg_tool_456",
+			"type":  "message",
+			"role":  "assistant",
+			"model": "claude-3-5-sonnet",
+			"content": []map[string]any{
+				{
+					"type": "text",
+					"text": "Fetching weather details...",
+				},
+				{
+					"type": "tool_use",
+					"id":   "toolu_weather_123",
+					"name": "lookup_weather",
+					"input": map[string]any{
+						"city": "Tokyo",
+					},
+				},
+			},
+			"stop_reason": "tool_use",
+			"usage": map[string]any{
+				"input_tokens":  20,
+				"output_tokens": 35,
+			},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer mockAnthropic.Close()
+
+	yamlCfg := fmt.Sprintf(`
+providers:
+  - name: mock-claude
+    api:
+      - api_format: anthropic
+        base_url: "%s/v1"
+    keys:
+      - key: sk-upstream-claude
+    health_check_rules: []
+combos:
+  - name: gemini-to-claude-tool
+    api_format: gemini
+    strategy: fill-first
+    members:
+      - provider: mock-claude
+        model: claude-3-5-sonnet
+        upstream_api_format: anthropic
+`, mockAnthropic.URL)
+
+	st, _ := newTestStateWithYAML(t, yamlCfg)
+	r := Router(st)
+
+	geminiReqBody := []byte(`{
+		"contents": [
+			{"role": "user", "parts": [{"text": "What's the weather in Tokyo?"}]}
+		]
+	}`)
+	req := httptest.NewRequest("POST", "/v1beta/models/gemini-to-claude-tool:generateContent", bytes.NewReader(geminiReqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	t.Logf("Response body: %s", w.Body.String())
+	var genResp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &genResp); err != nil {
+		t.Fatal(err)
+	}
+	candidates, ok := genResp["candidates"].([]any)
+	if !ok || len(candidates) == 0 {
+		t.Fatalf("expected candidates in Gemini response, got %s", w.Body.String())
+	}
+	cand0 := candidates[0].(map[string]any)
+	content := cand0["content"].(map[string]any)
+	parts := content["parts"].([]any)
+	if len(parts) != 2 {
+		t.Fatalf("expected 2 parts, got %d: %+v", len(parts), parts)
+	}
+	part0 := parts[0].(map[string]any)
+	if part0["text"] != "Fetching weather details..." {
+		t.Errorf("expected text 'Fetching weather details...', got %v", part0["text"])
+	}
+	part1 := parts[1].(map[string]any)
+	fc, ok := part1["functionCall"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected functionCall in part1, got %+v", part1)
+	}
+	if fc["name"] != "lookup_weather" {
+		t.Errorf("expected functionCall name 'lookup_weather', got %v", fc["name"])
+	}
+	if fc["id"] != "toolu_weather_123" {
+		t.Errorf("expected functionCall id 'toolu_weather_123', got %v", fc["id"])
+	}
+	args, ok := fc["args"].(map[string]any)
+	if !ok || args["city"] != "Tokyo" {
+		t.Errorf("expected args.city 'Tokyo', got %v", args)
+	}
+}

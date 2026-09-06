@@ -242,7 +242,7 @@ func (c *SSEClient) initializeLocked(ctx context.Context) (*protocol.InitializeR
 		ProtocolVersion: protocol.LatestProtocolVersion,
 		ClientInfo: protocol.Implementation{
 			Name:    "ccrouter",
-			Version: "0.7.0",
+			Version: "0.8.0",
 		},
 		Capabilities: protocol.ClientCapabilities{},
 	}

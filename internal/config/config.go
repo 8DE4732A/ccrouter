@@ -60,10 +60,10 @@ var validClientFormats = map[string]bool{
 	"openai-images":      true,
 	"openai-image-edits": true,
 	"openai-embeddings":  true,
+	"gemini":             true,
 }
 
 // validAPIFormats includes all formats valid for upstream endpoints and upstream_api_format hints.
-// Gemini is upstream-only: no client-facing route is registered for it.
 var validAPIFormats = map[string]bool{
 	"openai":             true,
 	"anthropic":          true,

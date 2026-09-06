@@ -135,8 +135,20 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		isStream = isStreamingRequest(r, body)
 	}
 	requestedModel := extractModel(body, r.Header.Get("Content-Type"))
-	if requestedModel == "" && apiFormat == "openai-image-edits" {
-		requestedModel = "dall-e-2"
+	if requestedModel == "" {
+		if apiFormat == "openai-image-edits" {
+			requestedModel = "dall-e-2"
+		} else if apiFormat == "gemini" {
+			requestedModel = extractModelFromPath(r.URL.Path)
+		}
+	}
+
+	if apiFormat == "gemini" {
+		action := extractActionFromPath(r.URL.Path)
+		if action != "" && action != "generateContent" && action != "streamGenerateContent" {
+			jsonErrorForFormat(w, apiFormat, 501, fmt.Sprintf("action %q is not supported", action), "unsupported_action")
+			return
+		}
 	}
 
 	// Capture client context once for verbose logging (zero-cost when disabled).
@@ -152,11 +164,11 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 
 	combo := s.Router.GetCombo(requestedModel)
 	if combo == nil {
-		jsonError(w, 400, fmt.Sprintf("unknown combo: %q", requestedModel), "proxy_error")
+		jsonErrorForFormat(w, apiFormat, 400, fmt.Sprintf("unknown combo: %q", requestedModel), "proxy_error")
 		return
 	}
 	if !combo.SupportsFormat(apiFormat) {
-		jsonError(w, 400, fmt.Sprintf("combo %q supports formats %v, but request was sent to %q endpoint",
+		jsonErrorForFormat(w, apiFormat, 400, fmt.Sprintf("combo %q supports formats %v, but request was sent to %q endpoint",
 			requestedModel, combo.APIFormats(), apiFormat), "proxy_error")
 		return
 	}
@@ -166,7 +178,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 	for {
 		providerName, model, upstreamFmt := s.Router.NextMemberWithFmt(requestedModel, attemptedMembers)
 		if providerName == "" {
-			jsonError(w, 503, fmt.Sprintf("all providers exhausted for combo %q", requestedModel), "proxy_error")
+			jsonErrorForFormat(w, apiFormat, 503, fmt.Sprintf("all providers exhausted for combo %q", requestedModel), "proxy_error")
 			return
 		}
 
@@ -181,7 +193,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		upstreamFmt = resolveUpstreamFormat(providerCfg, apiFormat, upstreamFmt)
 		targetURL := providerCfg.GetChatURL(upstreamFmt)
 		if targetURL == "" {
-			jsonError(w, 502, fmt.Sprintf("provider %q has no usable endpoint for request format %q", providerName, apiFormat), "proxy_error")
+			jsonErrorForFormat(w, apiFormat, 502, fmt.Sprintf("provider %q has no usable endpoint for request format %q", providerName, apiFormat), "proxy_error")
 			return
 		}
 		// Gemini URLs embed the model name: {base}/models/{model}:generateContent
@@ -196,7 +208,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		if isMultipart(reqContentType) {
 			newBody, newCT, err := rewriteModelMultipart(body, reqContentType, model)
 			if err != nil {
-				jsonError(w, 400, fmt.Sprintf("invalid multipart body: %v", err), "invalid_request_error")
+				jsonErrorForFormat(w, apiFormat, 400, fmt.Sprintf("invalid multipart body: %v", err), "invalid_request_error")
 				return
 			}
 			clientBody = newBody
@@ -210,7 +222,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 			// Verify the translator actually supports this format pair. If not, the
 			// request would silently pass through in the wrong format — fail fast.
 			if !translate.NeedTranslate(apiFormat, upstreamFmt) {
-				jsonError(w, 502, fmt.Sprintf("no translator available for %s -> %s (client format %q, upstream format %q)",
+				jsonErrorForFormat(w, apiFormat, 502, fmt.Sprintf("no translator available for %s -> %s (client format %q, upstream format %q)",
 					apiFormat, upstreamFmt, apiFormat, upstreamFmt), "proxy_error")
 				return
 			}
@@ -591,7 +603,7 @@ func (s *Service) networkError(w http.ResponseWriter, t0 time.Time, err error, k
 		msg = "upstream connection failed"
 	}
 	s.record(combo, providerName, model, key, apiFormat, isStream, &statusCode, false, "", map[string]any{}, t0, &msg, &matchedPayload)
-	jsonError(w, statusCode, msg, "proxy_error")
+	jsonErrorForFormat(w, apiFormat, statusCode, msg, "proxy_error")
 	return true
 }
 
@@ -643,6 +655,16 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func jsonError(w http.ResponseWriter, code int, msg, typ string) {
 	writeJSON(w, code, map[string]any{"error": msg, "type": typ})
+}
+
+func jsonErrorForFormat(w http.ResponseWriter, apiFormat string, code int, msg, typ string) {
+	if apiFormat == "gemini" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(code)
+		_, _ = w.Write(buildErrorBody("gemini", code, msg))
+		return
+	}
+	jsonError(w, code, msg, typ)
 }
 
 func containsString(list []string, s string) bool {
@@ -765,7 +787,39 @@ func rewriteModel(body []byte, model string) []byte {
 	return out
 }
 
+// extractModelFromPath extracts the model (combo) name from a Gemini URL path,
+// e.g. "/v1beta/models/gemini-1.5-flash:generateContent" -> "gemini-1.5-flash".
+func extractModelFromPath(path string) string {
+	idx := strings.Index(path, "/models/")
+	if idx == -1 {
+		return ""
+	}
+	sub := path[idx+len("/models/"):]
+	if colonIdx := strings.LastIndex(sub, ":"); colonIdx != -1 {
+		sub = sub[:colonIdx]
+	}
+	sub = strings.TrimPrefix(sub, "models/")
+	return strings.Trim(sub, "/")
+}
+
+// extractActionFromPath extracts the action suffix from a Gemini URL path,
+// e.g. "/v1beta/models/gemini-1.5-flash:generateContent" -> "generateContent".
+func extractActionFromPath(path string) string {
+	idx := strings.Index(path, "/models/")
+	if idx == -1 {
+		return ""
+	}
+	sub := path[idx+len("/models/"):]
+	if colonIdx := strings.LastIndex(sub, ":"); colonIdx != -1 {
+		return sub[colonIdx+1:]
+	}
+	return ""
+}
+
 func isStreamingRequest(r *http.Request, body []byte) bool {
+	if strings.Contains(r.URL.Path, "streamGenerateContent") || r.URL.Query().Get("alt") == "sse" {
+		return true
+	}
 	accept := strings.ToLower(r.Header.Get("Accept"))
 	if strings.Contains(accept, "text/event-stream") {
 		return true
@@ -810,8 +864,8 @@ func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http
 		if kl == "accept-encoding" {
 			continue
 		}
-		// Remove x-api-key / Authorization: we set the correct upstream auth below.
-		if kl == "x-api-key" || kl == "authorization" {
+		// Remove x-api-key / Authorization / x-goog-api-key: we set the correct upstream auth below.
+		if kl == "x-api-key" || kl == "authorization" || kl == "x-goog-api-key" {
 			continue
 		}
 		for _, v := range vs {
@@ -1035,6 +1089,34 @@ func buildErrorBody(apiFormat string, statusCode int, errMsg string) []byte {
 			},
 		})
 		return v
+	case "gemini":
+		status := "INTERNAL"
+		switch statusCode {
+		case 400:
+			status = "INVALID_ARGUMENT"
+		case 401:
+			status = "UNAUTHENTICATED"
+		case 403:
+			status = "PERMISSION_DENIED"
+		case 404:
+			status = "NOT_FOUND"
+		case 429:
+			status = "RESOURCE_EXHAUSTED"
+		case 501:
+			status = "UNIMPLEMENTED"
+		case 503:
+			status = "UNAVAILABLE"
+		case 504:
+			status = "DEADLINE_EXCEEDED"
+		}
+		v, _ := json.Marshal(map[string]any{
+			"error": map[string]any{
+				"code":    statusCode,
+				"message": errMsg,
+				"status":  status,
+			},
+		})
+		return v
 	default:
 		// openai, openai-responses, openai-images
 		v, _ := json.Marshal(map[string]any{
@@ -1105,15 +1187,16 @@ func (s *Service) runPayloadScripts(
 }
 
 // headerToMap converts http.Header to a flat map[string]string (first value per key).
-// Sensitive headers (Authorization, X-Api-Key) are masked to avoid leaking plaintext
-// API keys into verbose logs.
+// Sensitive headers (Authorization, X-Api-Key, x-goog-api-key, api-key) are masked
+// to avoid leaking plaintext API keys into verbose logs.
 func headerToMap(h http.Header) map[string]string {
 	m := make(map[string]string, len(h))
 	for k, vs := range h {
 		if len(vs) > 0 {
 			v := vs[0]
 			// Mask sensitive auth headers to avoid leaking API keys into logs.
-			if strings.EqualFold(k, "authorization") || strings.EqualFold(k, "x-api-key") {
+			if strings.EqualFold(k, "authorization") || strings.EqualFold(k, "x-api-key") ||
+				strings.EqualFold(k, "x-goog-api-key") || strings.EqualFold(k, "api-key") {
 				v = maskSecret(v)
 			}
 			m[k] = v

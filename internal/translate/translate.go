@@ -8,6 +8,8 @@ package translate
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"strings"
 
 	_ "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator/builtin" // register all translators
@@ -94,9 +96,65 @@ func TranslateResponseNonStream(
 	originalReq, translatedReq, body []byte,
 	param *any,
 ) []byte {
+	if clientFmt == "gemini" && upstreamFmt == "anthropic" {
+		body = claudeMessageToSSEEvents(body)
+	}
 	from := toUpstreamSDKFormat(upstreamFmt)
 	to := toClientSDKFormat(clientFmt)
 	return sdkt.TranslateNonStream(ctx, from, to, model, originalReq, translatedReq, body, param)
+}
+
+// claudeMessageToSSEEvents converts a non-streaming Claude JSON response into the SSE events
+// format expected by CLIProxyAPI's ConvertClaudeResponseToGeminiNonStream translator.
+func claudeMessageToSSEEvents(body []byte) []byte {
+	var msg struct {
+		ID      string `json:"id"`
+		Model   string `json:"model"`
+		Type    string `json:"type"`
+		Content []struct {
+			Type     string          `json:"type"`
+			Text     string          `json:"text"`
+			Thinking string          `json:"thinking"`
+			ID       string          `json:"id"`
+			Name     string          `json:"name"`
+			Input    json.RawMessage `json:"input"`
+		} `json:"content"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &msg); err != nil || msg.Type != "message" {
+		return body
+	}
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("data: {\"type\":\"message_start\",\"message\":{\"id\":%q,\"model\":%q}}\n", msg.ID, msg.Model))
+	for i, c := range msg.Content {
+		if c.Type == "text" {
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n", i))
+			textJSON, _ := json.Marshal(c.Text)
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"text_delta\",\"text\":%s}}\n", i, string(textJSON)))
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_stop\",\"index\":%d}\n", i))
+		} else if c.Type == "thinking" {
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n", i))
+			thoughtJSON, _ := json.Marshal(c.Thinking)
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":%s}}\n", i, string(thoughtJSON)))
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_stop\",\"index\":%d}\n", i))
+		} else if c.Type == "tool_use" {
+			idJSON, _ := json.Marshal(c.ID)
+			nameJSON, _ := json.Marshal(c.Name)
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":{\"type\":\"tool_use\",\"id\":%s,\"name\":%s}}\n", i, string(idJSON), string(nameJSON)))
+			inputStr := string(c.Input)
+			if strings.TrimSpace(inputStr) == "" || inputStr == "null" {
+				inputStr = "{}"
+			}
+			escapedJSON, _ := json.Marshal(inputStr)
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_delta\",\"index\":%d,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":%s}}\n", i, string(escapedJSON)))
+			b.WriteString(fmt.Sprintf("data: {\"type\":\"content_block_stop\",\"index\":%d}\n", i))
+		}
+	}
+	b.WriteString(fmt.Sprintf("data: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":%d,\"output_tokens\":%d}}\n", msg.Usage.InputTokens, msg.Usage.OutputTokens))
+	return []byte(b.String())
 }
 
 // NormaliseUpstreamFormat maps an upstream API format name to its endpoint path suffix.

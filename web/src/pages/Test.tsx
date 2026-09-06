@@ -42,6 +42,11 @@ function buildBody(
   if (fmt === 'openai-images') {
     return { model, prompt, n: 1, size: imageSize || '1024x1024' }
   }
+  if (fmt === 'gemini') {
+    return {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+    }
+  }
   // openai
   return {
     model,
@@ -56,6 +61,11 @@ function parseUsage(text: string, fmt: ApiFormat): { prompt?: number; completion
   try {
     const obj = JSON.parse(text)
     const u = obj.usage
+    if (fmt === 'gemini') {
+      const um = obj.usageMetadata
+      if (!um) return null
+      return { prompt: um.promptTokenCount, completion: um.candidatesTokenCount, total: um.totalTokenCount }
+    }
     if (!u) return null
     if (fmt === 'anthropic') {
       return { prompt: u.input_tokens, completion: u.output_tokens, total: (u.input_tokens ?? 0) + (u.output_tokens ?? 0) }
@@ -119,6 +129,19 @@ function extractStreamText(chunk: string, fmt: ApiFormat): { text?: string; thin
         if (obj.type === 'response.completed' && obj.response?.usage) {
           const u = obj.response.usage
           usage = mergeUsage(usage, { prompt: u.input_tokens, completion: u.output_tokens, total: u.total_tokens })
+        }
+      } else if (fmt === 'gemini') {
+        const parts = obj.candidates?.[0]?.content?.parts ?? []
+        for (const part of parts) {
+          if (part.thought) thinkingText += part.thought
+          if (part.text) text += part.text
+        }
+        if (obj.usageMetadata) {
+          usage = mergeUsage(usage, {
+            prompt: obj.usageMetadata.promptTokenCount,
+            completion: obj.usageMetadata.candidatesTokenCount,
+            total: obj.usageMetadata.totalTokenCount,
+          })
         }
       }
     } catch { /* skip malformed */ }
@@ -198,6 +221,16 @@ function parseNonStreamBlocks(fmt: ApiFormat, obj: unknown, rawText: string): Ou
       return [{ type: 'text', content: prefix + JSON.stringify(obj, null, 2) }]
     }
     return [{ type: 'text', content: rawText }]
+  }
+  if (fmt === 'gemini') {
+    const candidates = (o.candidates as any[]) ?? []
+    const parts = candidates[0]?.content?.parts ?? []
+    const blocks: OutputBlock[] = []
+    for (const part of parts) {
+      if (part.thought) blocks.push({ type: 'thinking', content: part.thought })
+      if (part.text) blocks.push({ type: 'text', content: part.text })
+    }
+    return blocks.length > 0 ? blocks : [{ type: 'text', content: rawText }]
   }
   return [{ type: 'text', content: rawText }]
 }
@@ -375,7 +408,14 @@ export default function TestPage() {
         })
       } else {
         const body = buildBody(fmt, comboName, prompt.trim(), stream, imageSizeCustom.trim() || imageSize, thinking)
-        resp = await fetch(FMT_ENDPOINT[fmt], {
+        let url = FMT_ENDPOINT[fmt]
+        if (fmt === 'gemini') {
+          url = stream
+            ? `/v1beta/models/${encodeURIComponent(comboName)}:streamGenerateContent?alt=sse`
+            : `/v1beta/models/${encodeURIComponent(comboName)}:generateContent`
+        }
+
+        resp = await fetch(url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

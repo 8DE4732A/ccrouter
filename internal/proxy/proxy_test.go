@@ -405,6 +405,29 @@ func TestMaskSecretScalesWithLength(t *testing.T) {
 	}
 }
 
+func TestHeaderToMapMasksSensitiveHeaders(t *testing.T) {
+	h := http.Header{}
+	h.Set("Authorization", "Bearer sk-secret-12345")
+	h.Set("X-Api-Key", "sk-ant-api03-abcdefg")
+	h.Set("x-goog-api-key", "AIzaSySecretGoogleKey123")
+	h.Set("api-key", "azure-secret-key")
+	h.Set("Content-Type", "application/json")
+
+	m := headerToMap(h)
+	if m["Content-Type"] != "application/json" {
+		t.Fatalf("expected Content-Type to remain unmasked, got %q", m["Content-Type"])
+	}
+	for _, key := range []string{"Authorization", "X-Api-Key", "x-goog-api-key", "api-key"} {
+		v := m[http.CanonicalHeaderKey(key)]
+		if !strings.Contains(v, "*") {
+			t.Fatalf("expected header %q to be masked, got %q", key, v)
+		}
+		if strings.Contains(v, "12345") || strings.Contains(v, "abcdefg") || strings.Contains(v, "SecretGoogleKey") {
+			t.Fatalf("expected secret in %q to be redacted, got %q", key, v)
+		}
+	}
+}
+
 // TestErrorResponseNotSilentlyEmptiedByTranslator verifies that when the client
 // format differs from the upstream format and the upstream returns an HTTP error
 // (e.g. 500 with an OpenAI-shaped {"error": {...}} body), the proxy does NOT run

@@ -642,7 +642,7 @@ func buildCombo(c map[string]any, ctx string, providerMap map[string]*ProviderCo
 	for _, f := range rawFormats {
 		f = lower(f)
 		if !validClientFormats[f] {
-			return nil, errf("%s.api_format %q is not a valid client-facing format (valid: openai, anthropic, openai-responses, openai-images, openai-image-edits, openai-embeddings)", ctx, f)
+			return nil, errf("%s.api_format %q is not a valid client-facing format (valid: openai, anthropic, openai-responses, openai-images, openai-image-edits, openai-embeddings, gemini)", ctx, f)
 		}
 		formats = append(formats, f)
 	}

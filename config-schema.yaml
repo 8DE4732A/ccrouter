@@ -126,13 +126,14 @@ ComboConfig:
   name:        <string>                    # 组内唯一标识符
   owned_by:    [string, default="default"] # 所属分组 ID（在平铺配置模式下使用）
   api_format:  <format | list[format]>     # 单值或列表，决定此 combo 接受哪些客户端格式
-                                           # 可选值：openai | anthropic | openai-responses | openai-images | openai-image-edits | openai-embeddings
+                                           # 可选值：openai | anthropic | openai-responses | openai-images | openai-image-edits | openai-embeddings | gemini
                                            # openai             → /v1/chat/completions
                                            # anthropic          → /v1/messages
                                            # openai-responses   → /v1/responses
                                            # openai-images      → /v1/images/generations
                                            # openai-image-edits → /v1/images/edits (配置 openai-images 时自动继承支持)
                                            # openai-embeddings  → /v1/embeddings
+                                           # gemini             → /v1beta/models/{model}:generateContent 等
   strategy:    [fill-first | round-robin, default=fill-first]
                                            # fill-first：优先第一个 member，耗尽才切换
                                            # round-robin：每次请求轮询 member
@@ -323,6 +324,10 @@ McpComboMemberConfig:
 #   POST /v1/images/generations←→  openai-images
 #   POST /v1/images/edits      ←→  openai-image-edits
 #   POST /v1/embeddings        ←→  openai-embeddings
+#   POST /v1beta/models/*      ←→  gemini (generateContent, streamGenerateContent 等)
+#   POST /v1/models/*          ←→  gemini
+#   POST /models/*             ←→  gemini
+#   GET  /v1beta/models        ←→  gemini (模型列表)
 #
 # MCP (Model Context Protocol) 聚合网关端点：
 #   POST /mcp/:combo           ←→  Streamable HTTP MCP 协议交互

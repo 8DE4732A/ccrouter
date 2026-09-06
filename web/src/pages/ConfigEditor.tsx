@@ -6,7 +6,7 @@ import type {
 } from '../api/client'
 
 // Client-facing formats (proxy routes exist for these).
-const CLIENT_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'openai-images', 'openai-image-edits', 'openai-embeddings']
+const CLIENT_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'openai-images', 'openai-image-edits', 'openai-embeddings', 'gemini']
 // All formats including upstream-only (for upstream_api_format hint).
 const ALL_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'openai-images', 'openai-image-edits', 'openai-embeddings', 'gemini']
 

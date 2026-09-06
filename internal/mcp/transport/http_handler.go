@@ -141,7 +141,7 @@ func (h *Handler) dispatchMethod(ctx context.Context, combo *gateway.Combo, req 
 			ProtocolVersion: protocol.LatestProtocolVersion,
 			ServerInfo: protocol.Implementation{
 				Name:    "ccrouter-mcp/" + combo.Name(),
-				Version: "0.7.0",
+				Version: "0.8.0",
 			},
 			Capabilities: protocol.ServerCapabilities{
 				Tools:     &protocol.ToolsCapability{ListChanged: true},

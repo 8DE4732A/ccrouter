@@ -62,6 +62,29 @@ func Router(state *gateway.State) *gin.Engine {
 		proxyGroup.GET("/v1/models", func(c *gin.Context) {
 			listModels(c, state)
 		})
+		// Gemini POST endpoints (generateContent / streamGenerateContent / countTokens)
+		proxyGroup.POST("/v1beta/models/*model_action", func(c *gin.Context) {
+			state.Service().Handle(c.Writer, c.Request, "gemini", false)
+		})
+		proxyGroup.POST("/v1/models/*model_action", func(c *gin.Context) {
+			state.Service().Handle(c.Writer, c.Request, "gemini", false)
+		})
+		proxyGroup.POST("/models/*model_action", func(c *gin.Context) {
+			state.Service().Handle(c.Writer, c.Request, "gemini", false)
+		})
+		// Gemini GET models endpoints
+		proxyGroup.GET("/v1beta/models", func(c *gin.Context) {
+			listGeminiModels(c, state)
+		})
+		proxyGroup.GET("/v1beta/models/*model_name", func(c *gin.Context) {
+			getGeminiModel(c, state)
+		})
+		proxyGroup.GET("/models", func(c *gin.Context) {
+			listGeminiModels(c, state)
+		})
+		proxyGroup.GET("/models/*model_name", func(c *gin.Context) {
+			getGeminiModel(c, state)
+		})
 		proxyGroup.GET("/health", healthCheck)
 		proxyGroup.GET("/keys/status", func(c *gin.Context) {
 			keysStatus(c, state)
@@ -178,11 +201,10 @@ func Router(state *gateway.State) *gin.Engine {
 
 // apiKeyAuth returns a middleware that validates the client's credentials
 // against general.api_keys. If no api_keys are configured, all requests are
-// allowed. Accepts both "Authorization: Bearer <key>" (OpenAI style) and
-// "x-api-key: <key>" (Anthropic style). If the client sends only one of the
-// two, that one must match a configured key. If the client sends both, both
-// must independently match a configured key — a stray/incorrect value in
-// either header is rejected, rather than silently ignored.
+// allowed. Accepts "Authorization: Bearer <key>" (OpenAI style), "x-api-key: <key>"
+// (Anthropic style), "x-goog-api-key: <key>" (Gemini header style), and "?key=<key>"
+// (Gemini query parameter style). If the client sends credentials, all sent credentials
+// must match a configured key.
 func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		svc := state.Service()
@@ -202,6 +224,8 @@ func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 		}
 
 		xAPIKey := c.GetHeader("X-Api-Key")
+		xGoogAPIKey := c.GetHeader("x-goog-api-key")
+		queryKey := c.Query("key")
 
 		var bearerToken string
 		hasBearer := false
@@ -213,20 +237,43 @@ func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 			}
 		}
 
-		if xAPIKey == "" && !hasBearer {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
-				"error": "missing API key (send Authorization: Bearer <key> or X-Api-Key: <key>)",
-				"type":  "auth_error",
-			})
+		isGemini := strings.HasPrefix(c.Request.URL.Path, "/v1beta/models") ||
+			strings.HasPrefix(c.Request.URL.Path, "/models") ||
+			xGoogAPIKey != "" || queryKey != ""
+
+		abortAuthError := func(msg string) {
+			if isGemini {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+					"error": gin.H{
+						"code":    http.StatusUnauthorized,
+						"message": msg,
+						"status":  "UNAUTHENTICATED",
+					},
+				})
+				return
+			}
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": msg, "type": "auth_error"})
+		}
+
+		if xAPIKey == "" && !hasBearer && xGoogAPIKey == "" && queryKey == "" {
+			abortAuthError("missing API key (send Authorization: Bearer <key>, X-Api-Key: <key>, x-goog-api-key: <key>, or ?key=<key>)")
 			return
 		}
 
 		if xAPIKey != "" && !matches(xAPIKey) {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API key", "type": "auth_error"})
+			abortAuthError("invalid API key")
 			return
 		}
 		if hasBearer && !matches(bearerToken) {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid API key", "type": "auth_error"})
+			abortAuthError("invalid API key")
+			return
+		}
+		if xGoogAPIKey != "" && !matches(xGoogAPIKey) {
+			abortAuthError("invalid API key")
+			return
+		}
+		if queryKey != "" && !matches(queryKey) {
+			abortAuthError("invalid API key")
 			return
 		}
 

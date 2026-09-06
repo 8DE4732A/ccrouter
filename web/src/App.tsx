@@ -244,7 +244,7 @@ export default function App() {
         <div className="sidebar-footer">
           <div className="footer-meta">
             <span>ccrouter</span>
-            {!collapsed && <span style={{ opacity: 0.5 }}>v0.7.0</span>}
+            {!collapsed && <span style={{ opacity: 0.5 }}>v0.8.0</span>}
           </div>
           {authRequired && (
             <button
