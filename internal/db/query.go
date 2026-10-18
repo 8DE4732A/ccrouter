@@ -24,6 +24,8 @@ func QueryStats(dbPath, groupBy string, since, until *float64) ([]map[string]any
 			SUM(COALESCE(completion_tokens,0)) AS completion_tokens,
 			SUM(COALESCE(cache_read_tokens, 0))  AS cache_read_tokens,
 			SUM(COALESCE(cache_write_tokens, 0)) AS cache_write_tokens,
+			SUM(COALESCE(cost_usd, 0))       AS cost_usd,
+			COUNT(cost_usd)                  AS priced_count,
 			AVG(NULLIF(duration_ms, 0))      AS avg_duration_ms
 		FROM requests
 		%s

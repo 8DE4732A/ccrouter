@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { getConfig, putConfig, FMT_ENDPOINT, FMT_COLOR, normalizeFormats } from '../api/client'
+import { getConfig, putConfig, FMT_ENDPOINT, FMT_COLOR, normalizeFormats, suggestModelsDev } from '../api/client'
 import type {
   AppConfig, ProviderConfig, ComboConfig, HealthCheckRule, ComboMember, ApiEndpoint, ApiFormat,
-  PayloadScript, GeneralConfig, ProxyConfig, LoggingConfig,
+  PayloadScript, GeneralConfig, ProxyConfig, LoggingConfig, ModelCost, ModelsDevEntry, ModelsDevConfig,
 } from '../api/client'
+import ModelsDevPicker from '../components/ModelsDevPicker'
 
 // Client-facing formats (proxy routes exist for these).
 const CLIENT_FORMATS: ApiFormat[] = ['openai', 'anthropic', 'openai-responses', 'openai-images', 'openai-image-edits', 'openai-embeddings', 'gemini']
@@ -25,6 +26,13 @@ const EMPTY_COMBO = (): ComboConfig => ({
   members: [{ provider: '', model: '' }], aliases: [],
 })
 const EMPTY_PAYLOAD_SCRIPT = (): PayloadScript => ({ name: '', enabled: true, script: '' })
+
+// parseOptionalInt converts an <input type="number"> value, mapping empty or
+// invalid input to undefined so the field is omitted from the saved config.
+function parseOptionalInt(v: string): number | undefined {
+  const n = parseInt(v, 10)
+  return isNaN(n) ? undefined : n
+}
 
 
 // ── Icons ────────────────────────────────────────────────────────
@@ -349,6 +357,208 @@ function ProviderDetail({
 }
 
 // ── Combo detail panel ───────────────────────────────────────────
+// ── Combo member row with models.dev metadata ───────────────────
+const COST_FIELDS: { key: keyof ModelCost; label: string }[] = [
+  { key: 'input', label: '输入 $/1M' },
+  { key: 'output', label: '输出 $/1M' },
+  { key: 'cache_read', label: '缓存读 $/1M' },
+  { key: 'cache_write', label: '缓存写 $/1M' },
+]
+
+function ComboMemberRow({
+  member, index, total, providerNames, onChange, onRemove, onMoveUp, onMoveDown,
+}: {
+  member: ComboMember
+  index: number
+  total: number
+  providerNames: string[]
+  onChange: (next: ComboMember) => void
+  onRemove: () => void
+  onMoveUp: () => void
+  onMoveDown: () => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [suggesting, setSuggesting] = useState(false)
+  const [suggestMsg, setSuggestMsg] = useState('')
+  const [candidates, setCandidates] = useState<ModelsDevEntry[]>([])
+
+  const hasParams = member.context_window != null || member.max_output_tokens != null || member.cost != null
+  const patch = (next: Partial<ComboMember>) => onChange({ ...member, ...next })
+  const num = (v: string): number | undefined => (v === '' ? undefined : Number(v))
+
+  // Snapshot the catalog entry into the member. Undefined fields are omitted
+  // so the config dump stays clean; explicit zeros are preserved.
+  const applyEntry = (e: ModelsDevEntry) => {
+    const cost: ModelCost | undefined = e.cost ? { ...e.cost } : undefined
+    onChange({
+      ...member,
+      context_window: e.context_window,
+      max_output_tokens: e.max_output_tokens,
+      cost,
+      models_dev_source: e.source_id,
+    })
+    setCandidates([])
+    setSuggestMsg(`已从 models.dev 填充（${e.source_id}）`)
+    setExpanded(true)
+  }
+
+  const suggest = async () => {
+    if (!member.model.trim()) return
+    setSuggesting(true)
+    setSuggestMsg('')
+    try {
+      const res = await suggestModelsDev({
+        model: member.model.trim(),
+        provider: member.provider || undefined,
+        limit: 5,
+      })
+      const top = res.items[0]
+      if (!top) {
+        setSuggestMsg(res.status.ready
+          ? 'models.dev 未找到匹配，可手动填写'
+          : 'models.dev 目录正在加载，请稍后重试')
+        return
+      }
+      const second = res.items[1]
+      const topScore = top.match_score ?? 0
+      if (topScore >= 0.9 && (!second || topScore > (second.match_score ?? 0))) {
+        applyEntry(top)
+      } else {
+        setCandidates(res.items)
+        setSuggestMsg(`找到 ${res.items.length} 个候选，请选择`)
+      }
+    } catch (e: unknown) {
+      setSuggestMsg(String(e))
+    }
+    setSuggesting(false)
+  }
+
+  const clearParams = () => {
+    onChange({
+      ...member,
+      context_window: undefined,
+      max_output_tokens: undefined,
+      cost: undefined,
+      models_dev_source: undefined,
+    })
+    setCandidates([])
+    setSuggestMsg('')
+  }
+
+  const smallBtn = { fontSize: 11, padding: '2px 8px' }
+
+  return (
+    <div style={{
+      background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 'var(--radius)',
+      padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6,
+    }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '24px 1fr 1fr 180px 84px', gap: 8, alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--font-mono)', textAlign: 'center' }}>{index + 1}</span>
+        <select value={member.provider}
+          onChange={e => patch({ provider: e.target.value })}>
+          <option value="">— Provider —</option>
+          {providerNames.map(n => <option key={n} value={n}>{n}</option>)}
+        </select>
+        <input value={member.model} placeholder="上游模型 ID"
+          style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+          onChange={e => patch({ model: e.target.value })} />
+        {/* upstream_api_format: empty = same as combo's client format (no translation) */}
+        <select
+          value={member.upstream_api_format ?? ''}
+          title="留空表示与客户端格式相同（无需翻译）"
+          onChange={e => patch({ upstream_api_format: e.target.value || undefined })}
+          style={{ fontSize: 12, color: member.upstream_api_format ? 'var(--text)' : 'var(--text-3)' }}
+        >
+          <option value="">— 同客户端格式 —</option>
+          {ALL_FORMATS.map(f => <option key={f} value={f}>{f}</option>)}
+        </select>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          <button type="button" className="btn-icon" disabled={index === 0} title="上移"
+            onClick={onMoveUp} style={{ width: 22, height: 22, padding: 0, fontSize: 11 }}>
+            ↑
+          </button>
+          <button type="button" className="btn-icon" disabled={index === total - 1} title="下移"
+            onClick={onMoveDown} style={{ width: 22, height: 22, padding: 0, fontSize: 11 }}>
+            ↓
+          </button>
+          <button type="button" className="btn-icon" disabled={total <= 1} title="删除"
+            onClick={onRemove} style={{ width: 22, height: 22, padding: 0 }}>
+            <IconTrash />
+          </button>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 11, color: 'var(--text-3)' }}>
+        <button type="button" className="btn btn-sm" style={smallBtn} onClick={() => setExpanded(v => !v)}>
+          {expanded ? '收起参数' : `模型参数与价格${hasParams ? ' ●' : ''}`}
+        </button>
+        <button type="button" className="btn btn-sm" style={smallBtn}
+          onClick={suggest} disabled={suggesting || !member.model.trim()}>
+          {suggesting ? '查询中…' : '自动获取'}
+        </button>
+        <button type="button" className="btn btn-sm" style={smallBtn} onClick={() => setPickerOpen(true)}>
+          从 models.dev 选择
+        </button>
+        {member.models_dev_source && <code style={{ fontSize: 11 }}>{member.models_dev_source}</code>}
+        {hasParams && (
+          <button type="button" className="btn btn-sm" style={smallBtn} onClick={clearParams}>清除参数</button>
+        )}
+        {suggestMsg && <span style={{ color: 'var(--text-2)' }}>{suggestMsg}</span>}
+      </div>
+
+      {candidates.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 12 }}>
+          <span style={{ color: 'var(--text-3)' }}>候选（价格可能不同）：</span>
+          {candidates.map(c => (
+            <button key={c.source_id} type="button" className="btn btn-sm"
+              style={{ justifyContent: 'flex-start', textAlign: 'left', fontSize: 12 }}
+              onClick={() => applyEntry(c)}>
+              {c.provider_name} / {c.model_id}
+              {c.context_window != null ? ` · ${c.context_window.toLocaleString()} ctx` : ''}
+              {c.cost?.input != null ? ` · $${c.cost.input}/1M in` : ''}
+              {c.cost?.output != null ? ` · $${c.cost.output}/1M out` : ''}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {expanded && (
+        <div style={{
+          display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: 8,
+          paddingTop: 8, borderTop: '1px solid var(--border)',
+        }}>
+          <label style={{ fontSize: 11, color: 'var(--text-3)', display: 'flex', flexDirection: 'column', gap: 3 }}>
+            Context Window (tokens)
+            <input type="number" min={1} value={member.context_window ?? ''}
+              onChange={e => patch({ context_window: num(e.target.value) })} />
+          </label>
+          <label style={{ fontSize: 11, color: 'var(--text-3)', display: 'flex', flexDirection: 'column', gap: 3 }}>
+            Max Output Tokens
+            <input type="number" min={1} value={member.max_output_tokens ?? ''}
+              onChange={e => patch({ max_output_tokens: num(e.target.value) })} />
+          </label>
+          {COST_FIELDS.map(f => (
+            <label key={f.key} style={{ fontSize: 11, color: 'var(--text-3)', display: 'flex', flexDirection: 'column', gap: 3 }}>
+              {f.label}
+              <input type="number" min={0} step="any" value={member.cost?.[f.key] ?? ''}
+                onChange={e => patch({ cost: { ...(member.cost ?? {}), [f.key]: num(e.target.value) } })} />
+            </label>
+          ))}
+        </div>
+      )}
+
+      <ModelsDevPicker
+        open={pickerOpen}
+        initialQuery={member.model}
+        providerHint={member.provider}
+        onClose={() => setPickerOpen(false)}
+        onSelect={applyEntry}
+      />
+    </div>
+  )
+}
+
 function ComboDetail({
   cb, providerNames, existingGroups, onUpdate,
 }: {
@@ -508,86 +718,27 @@ function ComboDetail({
             ))}
           </div>
           {cb.members.map((m, mi) => (
-            <div key={mi} style={{
-              display: 'grid', gridTemplateColumns: '24px 1fr 1fr 180px 84px',
-              gap: 8, alignItems: 'center',
-              padding: '8px 10px',
-              background: 'var(--bg)',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius)',
-            }}>
-              <span style={{ fontSize: 11, color: 'var(--text-3)', fontFamily: 'var(--font-mono)', textAlign: 'center' }}>{mi + 1}</span>
-              <select value={m.provider}
-                onChange={e => onUpdate({
-                  members: cb.members.map((mm, mj): ComboMember => mj === mi ? { ...mm, provider: e.target.value } : mm),
-                })}>
-                <option value="">— Provider —</option>
-                {providerNames.map(n => <option key={n} value={n}>{n}</option>)}
-              </select>
-              <input value={m.model} placeholder="上游模型 ID"
-                style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
-                onChange={e => onUpdate({
-                  members: cb.members.map((mm, mj): ComboMember => mj === mi ? { ...mm, model: e.target.value } : mm),
-                })} />
-              {/* upstream_api_format: empty = same as combo's client format (no translation) */}
-              <select
-                value={m.upstream_api_format ?? ''}
-                title="留空表示与客户端格式相同（无需翻译）"
-                onChange={e => onUpdate({
-                  members: cb.members.map((mm, mj): ComboMember =>
-                    mj === mi ? { ...mm, upstream_api_format: e.target.value || undefined } : mm
-                  ),
-                })}
-                style={{ fontSize: 12, color: m.upstream_api_format ? 'var(--text)' : 'var(--text-3)' }}
-              >
-                <option value="">— 同客户端格式 —</option>
-                {ALL_FORMATS.map(f => <option key={f} value={f}>{f}</option>)}
-              </select>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                <button
-                  type="button"
-                  className="btn-icon"
-                  disabled={mi === 0}
-                  title="上移"
-                  onClick={() => {
-                    const members = [...cb.members]
-                    const temp = members[mi - 1]
-                    members[mi - 1] = members[mi]
-                    members[mi] = temp
-                    onUpdate({ members })
-                  }}
-                  style={{ width: 22, height: 22, padding: 0, fontSize: 11 }}
-                >
-                  ↑
-                </button>
-                <button
-                  type="button"
-                  className="btn-icon"
-                  disabled={mi === cb.members.length - 1}
-                  title="下移"
-                  onClick={() => {
-                    const members = [...cb.members]
-                    const temp = members[mi + 1]
-                    members[mi + 1] = members[mi]
-                    members[mi] = temp
-                    onUpdate({ members })
-                  }}
-                  style={{ width: 22, height: 22, padding: 0, fontSize: 11 }}
-                >
-                  ↓
-                </button>
-                <button
-                  type="button"
-                  className="btn-icon"
-                  disabled={cb.members.length <= 1}
-                  title="删除"
-                  onClick={() => onUpdate({ members: cb.members.filter((_, mj) => mj !== mi) })}
-                  style={{ width: 22, height: 22, padding: 0 }}
-                >
-                  <IconTrash />
-                </button>
-              </div>
-            </div>
+            <ComboMemberRow
+              key={mi}
+              member={m}
+              index={mi}
+              total={cb.members.length}
+              providerNames={providerNames}
+              onChange={next => onUpdate({
+                members: cb.members.map((mm, mj): ComboMember => mj === mi ? next : mm),
+              })}
+              onRemove={() => onUpdate({ members: cb.members.filter((_, mj) => mj !== mi) })}
+              onMoveUp={() => {
+                const members = [...cb.members]
+                ;[members[mi - 1], members[mi]] = [members[mi], members[mi - 1]]
+                onUpdate({ members })
+              }}
+              onMoveDown={() => {
+                const members = [...cb.members]
+                ;[members[mi + 1], members[mi]] = [members[mi], members[mi + 1]]
+                onUpdate({ members })
+              }}
+            />
           ))}
           {/* Translation note */}
           <div style={{ fontSize: 11, color: 'var(--text-3)', padding: '4px 10px', lineHeight: 1.5 }}>
@@ -628,9 +779,12 @@ function GeneralPanel({
 
   const apiKeys = general.api_keys ?? []
   const proxy = general.proxy ?? {}
+  const modelsDev = general.models_dev ?? {}
 
   const updateProxy = (patch: Partial<ProxyConfig>) =>
     onUpdate({ proxy: { ...proxy, ...patch } })
+  const updateModelsDev = (patch: Partial<ModelsDevConfig>) =>
+    onUpdate({ models_dev: { ...modelsDev, ...patch } })
 
   const proxyEnabled = !!(proxy.url || proxy.disabled !== undefined)
 
@@ -826,10 +980,7 @@ function GeneralPanel({
             value={logging.max_file_size_mb ?? ''}
             placeholder="20"
             style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 120 }}
-            onChange={e => {
-              const val = parseInt(e.target.value, 10)
-              onUpdateLogging({ max_file_size_mb: isNaN(val) ? undefined : val })
-            }}
+            onChange={e => onUpdateLogging({ max_file_size_mb: parseOptionalInt(e.target.value) })}
           />
         </FieldRow>
 
@@ -841,10 +992,7 @@ function GeneralPanel({
             value={logging.max_backups ?? ''}
             placeholder="10"
             style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 120 }}
-            onChange={e => {
-              const val = parseInt(e.target.value, 10)
-              onUpdateLogging({ max_backups: isNaN(val) ? undefined : val })
-            }}
+            onChange={e => onUpdateLogging({ max_backups: parseOptionalInt(e.target.value) })}
           />
         </FieldRow>
 
@@ -859,6 +1007,53 @@ function GeneralPanel({
             <option value="better">better（高压缩比）</option>
             <option value="best">best（极致压缩）</option>
           </select>
+        </FieldRow>
+      </div>
+
+      {/* models.dev catalog */}
+      <div>
+        <SectionLabel>models.dev 模型目录</SectionLabel>
+        <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 12 }}>
+          用于在 Combo 成员编辑时搜索模型并自动填充上下文长度与价格。选中的值会快照到成员配置，
+          因此 models.dev 不可用时不影响代理与计费。
+        </div>
+        <FieldRow label="启用自动获取" hint="关闭后管理界面不再请求 models.dev，仍可手动填写参数">
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={!modelsDev.disabled}
+              onChange={e => updateModelsDev({ disabled: e.target.checked ? undefined : true })}
+            />
+            <span style={{ fontSize: 13, fontWeight: 500 }}>
+              {modelsDev.disabled ? '已禁用' : '已启用'}
+            </span>
+          </label>
+        </FieldRow>
+        <FieldRow label="Base URL" hint="默认 https://models.dev，可指向本地镜像">
+          <input
+            value={modelsDev.base_url ?? ''}
+            placeholder="https://models.dev"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 360 }}
+            onChange={e => updateModelsDev({ base_url: e.target.value.trim() || undefined })}
+          />
+        </FieldRow>
+        <FieldRow label="请求超时（秒）" hint="拉取目录的超时时间，默认 10">
+          <input
+            type="number" min={1} max={600}
+            value={modelsDev.timeout_seconds ?? ''}
+            placeholder="10"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 120 }}
+            onChange={e => updateModelsDev({ timeout_seconds: parseOptionalInt(e.target.value) })}
+          />
+        </FieldRow>
+        <FieldRow label="缓存有效期（秒）" hint="目录缓存时间，默认 3600">
+          <input
+            type="number" min={1} max={86400}
+            value={modelsDev.cache_ttl_seconds ?? ''}
+            placeholder="3600"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12, maxWidth: 120 }}
+            onChange={e => updateModelsDev({ cache_ttl_seconds: parseOptionalInt(e.target.value) })}
+          />
         </FieldRow>
       </div>
     </div>
@@ -1032,6 +1227,15 @@ export default function ConfigEditor() {
       if (!cleanGeneral.admin_password || cleanGeneral.admin_password.trim() === '') {
         delete cleanGeneral.admin_password
       }
+      if (cleanGeneral.models_dev) {
+        const md = { ...cleanGeneral.models_dev }
+        if (!md.disabled) delete md.disabled
+        if (!md.base_url) delete md.base_url
+        if (md.timeout_seconds == null) delete md.timeout_seconds
+        if (md.cache_ttl_seconds == null) delete md.cache_ttl_seconds
+        if (Object.keys(md).length === 0) delete cleanGeneral.models_dev
+        else cleanGeneral.models_dev = md
+      }
 
       await putConfig({
         ...cfg,
@@ -1046,6 +1250,19 @@ export default function ConfigEditor() {
           members: c.members.map(m => {
             const mm = { ...m }
             if (!mm.upstream_api_format) delete mm.upstream_api_format
+            if (mm.context_window == null) delete mm.context_window
+            if (mm.max_output_tokens == null) delete mm.max_output_tokens
+            if (mm.cost) {
+              const cost = { ...mm.cost }
+              COST_FIELDS.forEach(f => {
+                if (cost[f.key] == null) delete cost[f.key]
+              })
+              if (Object.keys(cost).length === 0) delete mm.cost
+              else mm.cost = cost
+            } else {
+              delete mm.cost
+            }
+            if (!mm.models_dev_source) delete mm.models_dev_source
             return mm
           }),
         })),

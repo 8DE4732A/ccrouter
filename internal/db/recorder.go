@@ -2,7 +2,9 @@ package db
 
 import (
 	"database/sql"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,6 +29,7 @@ type Row struct {
 	TotalTokens      *int
 	CacheReadTokens  *int
 	CacheWriteTokens *int
+	CostUSD          *float64
 	DurationMs       *int
 	Error            *string
 	MatchedPayload   *string
@@ -67,6 +70,7 @@ CREATE TABLE IF NOT EXISTS requests (
   total_tokens     INTEGER,
   cache_read_tokens  INTEGER,
   cache_write_tokens INTEGER,
+  cost_usd         REAL,
   duration_ms      INTEGER,
   error            TEXT,
   matched_payload  TEXT
@@ -116,6 +120,11 @@ var migrations = []string{
 	"ALTER TABLE requests ADD COLUMN cache_read_tokens  INTEGER",
 	"ALTER TABLE requests ADD COLUMN cache_write_tokens INTEGER",
 	"ALTER TABLE requests ADD COLUMN matched_payload    TEXT",
+	"ALTER TABLE requests ADD COLUMN cost_usd           REAL",
+}
+
+func isDuplicateColumnError(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "duplicate column name")
 }
 
 // Recorder writes request records to SQLite with a background writer goroutine.
@@ -145,7 +154,12 @@ func NewRecorder(dbPath string) (*Recorder, error) {
 		return nil, err
 	}
 	for _, m := range migrations {
-		_, _ = conn.Exec(m) // ignore "duplicate column" errors
+		// "duplicate column name" is expected on an already-migrated database;
+		// anything else (disk, lock, permissions) must not be swallowed.
+		if _, err := conn.Exec(m); err != nil && !isDuplicateColumnError(err) {
+			conn.Close()
+			return nil, fmt.Errorf("migrate requests table: %w", err)
+		}
 	}
 	r := &Recorder{
 		dbPath:     dbPath,
@@ -196,7 +210,7 @@ func (r *Recorder) insert(row *Row) {
 	_, err := r.writeConn.Exec(insertSQL, row.TS, row.Combo, row.Provider, row.Model,
 		row.KeyPrefix, row.APIFormat, row.IsStream, row.StatusCode, row.Success, row.MatchedRule,
 		row.PromptTokens, row.CompletionTokens, row.TotalTokens, row.CacheReadTokens,
-		row.CacheWriteTokens, row.DurationMs, row.Error, row.MatchedPayload)
+		row.CacheWriteTokens, row.CostUSD, row.DurationMs, row.Error, row.MatchedPayload)
 	if err == nil {
 		atomic.AddInt64(&r.written, 1)
 	}
@@ -220,9 +234,9 @@ var insertSQL = `INSERT INTO requests
   (ts, combo, provider, model, key_prefix, api_format, is_stream,
    status_code, success, matched_rule,
    prompt_tokens, completion_tokens, total_tokens,
-   cache_read_tokens, cache_write_tokens,
+   cache_read_tokens, cache_write_tokens, cost_usd,
    duration_ms, error, matched_payload)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 // Record enqueues a row for writing (non-blocking). Returns false if dropped.
 func (r *Recorder) Record(row *Row) bool {

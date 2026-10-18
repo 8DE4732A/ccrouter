@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"ccrouter/internal/db"
 	"ccrouter/internal/gateway"
 	"ccrouter/internal/mcp/protocol"
+	"ccrouter/internal/modelsdev"
 	"ccrouter/internal/report"
 )
 
@@ -1604,5 +1606,69 @@ combos:
 	args, ok := fc["args"].(map[string]any)
 	if !ok || args["city"] != "Tokyo" {
 		t.Errorf("expected args.city 'Tokyo', got %v", args)
+	}
+}
+
+func TestModelsDevAdminAPI(t *testing.T) {
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api.json" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = io.WriteString(w, `{
+  "anthropic": {"id":"anthropic","name":"Anthropic","models":{
+    "claude-opus-4-6":{"id":"claude-opus-4-6","name":"Claude Opus 4.6",
+      "limit":{"context":1000000,"output":128000},
+      "cost":{"input":5,"output":25,"cache_read":0.5,"cache_write":6.25}}}}}`)
+	}))
+	defer catalog.Close()
+
+	st, _ := newTestState(t)
+	st.ModelsDev().Reconfigure(modelsdev.Options{BaseURL: catalog.URL})
+	if _, err := st.ModelsDev().Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	r := Router(st)
+
+	rec := doGET(t, r, "/admin/api/modelsdev/search?q=claude")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("search status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var search struct {
+		Items  []modelsdev.Entry `json:"items"`
+		Status modelsdev.Status  `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &search); err != nil {
+		t.Fatal(err)
+	}
+	if len(search.Items) != 1 || search.Items[0].SourceID != "anthropic/claude-opus-4-6" {
+		t.Fatalf("unexpected search items: %+v", search.Items)
+	}
+	if !search.Status.Ready || search.Status.ModelCount != 1 {
+		t.Fatalf("unexpected status: %+v", search.Status)
+	}
+
+	rec = doGET(t, r, "/admin/api/modelsdev/suggest?model=claude-opus-4-6&provider=anthropic")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("suggest status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var suggest struct {
+		Items []modelsdev.Entry `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &suggest); err != nil {
+		t.Fatal(err)
+	}
+	if len(suggest.Items) == 0 || suggest.Items[0].MatchScore < 0.9 {
+		t.Fatalf("unexpected suggest items: %+v", suggest.Items)
+	}
+
+	rec = doGET(t, r, "/admin/api/modelsdev/lookup?source=anthropic/claude-opus-4-6")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("lookup status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doGET(t, r, "/admin/api/modelsdev/status")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status endpoint = %d", rec.Code)
 	}
 }

@@ -38,7 +38,7 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 
 	resp, err := s.clientFor(providerName).Do(req)
 	if err != nil {
-		return s.networkError(w, t0, err, km, providerName, model, true, combo, key, clientAPIFormat, matchedPayload), nil
+		return s.networkError(w, t0, err, km, providerName, model, true, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload), nil
 	}
 
 	mediaType := resp.Header.Get("Content-Type")
@@ -79,10 +79,10 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		if httpOK {
 			km.RecordSuccess(key, model)
 			usage := extractUsage(respBody, upstreamAPIFormat)
-			s.record(combo, providerName, model, key, clientAPIFormat, true, &statusCode, true, "", usage, t0, nil, &matchedPayload)
+			s.record(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, true, &statusCode, true, "", usage, t0, nil, &matchedPayload)
 		} else {
 			errText := extractErrorText(respBody)
-			s.record(combo, providerName, model, key, clientAPIFormat, true, &statusCode, false, "", map[string]any{}, t0, &errText, &matchedPayload)
+			s.record(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, true, &statusCode, false, "", map[string]any{}, t0, &errText, &matchedPayload)
 		}
 		if clientCtx != nil && upstreamCtx != nil {
 			s.reportLog(combo, providerName, model, clientAPIFormat, true, statusCode, httpOK,
@@ -232,7 +232,7 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		sniffUsageChunk(firstFrame, upstreamAPIFormat, holder)
 		if !writeFrame(firstFrame) {
 			resp.Body.Close()
-			s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
+			s.finishStream(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
 			return true, nil
 		}
 		if f, ok := w.(http.Flusher); ok {
@@ -247,7 +247,7 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		sniffUsageChunk(frame, upstreamAPIFormat, holder)
 		if !writeFrame(frame) {
 			resp.Body.Close()
-			s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
+			s.finishStream(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
 			return true, nil
 		}
 		if f, ok := w.(http.Flusher); ok {
@@ -262,7 +262,7 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		log.Printf("SSE scanner error: provider=%s model=%s err=%v", providerName, model, err)
 		success = false
 	}
-	s.finishStream(combo, providerName, model, key, clientAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
+	s.finishStream(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, statusCode, success, holder.usage, t0, matchedPayload, clientCtx, upstreamCtx, accumulator)
 	return true, nil
 }
 
@@ -309,13 +309,13 @@ func stripSSEPrefix(line []byte) []byte {
 	return line
 }
 
-func (s *Service) finishStream(combo, providerName, model, key, clientAPIFormat string,
+func (s *Service) finishStream(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat string,
 	statusCode int, success bool, usage map[string]any, t0 time.Time, matchedPayload string,
 	clientCtx, upstreamCtx map[string]any, accumulated []byte) {
 	if success {
 		s.KeyManagers[providerName].RecordSuccess(key, model)
 	}
-	s.record(combo, providerName, model, key, clientAPIFormat, true, &statusCode, success, "", usage, t0, nil, &matchedPayload)
+	s.record(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, true, &statusCode, success, "", usage, t0, nil, &matchedPayload)
 	if clientCtx != nil && upstreamCtx != nil {
 		s.reportLog(combo, providerName, model, clientAPIFormat, true, statusCode, success,
 			int(time.Since(t0).Milliseconds()), clientCtx, upstreamCtx,

@@ -51,11 +51,19 @@ export type APIKeyEntry = {
   key: string
 }
 
+export type ModelsDevConfig = {
+  disabled?: boolean
+  base_url?: string
+  timeout_seconds?: number
+  cache_ttl_seconds?: number
+}
+
 export type GeneralConfig = {
   api_keys?: APIKeyEntry[]
   proxy?: ProxyConfig
   request_timeout_seconds?: number  // upstream request timeout in seconds, default 600 (10min)
   admin_password?: string
+  models_dev?: ModelsDevConfig
 }
 
 export type HealthCheckRule = {
@@ -86,10 +94,21 @@ export type ProviderConfig = {
   proxy?: ProxyConfig
 }
 
+export type ModelCost = {
+  input?: number
+  output?: number
+  cache_read?: number
+  cache_write?: number
+}
+
 export type ComboMember = {
   provider: string
   model: string
   upstream_api_format?: string  // optional: override the API format sent to this upstream
+  context_window?: number
+  max_output_tokens?: number
+  cost?: ModelCost
+  models_dev_source?: string
 }
 
 export type ApiFormat = 'openai' | 'anthropic' | 'openai-responses' | 'openai-images' | 'openai-image-edits' | 'openai-embeddings' | 'gemini'
@@ -183,6 +202,8 @@ export type SummaryRow = {
   completion_tokens: number
   cache_read_tokens: number
   cache_write_tokens: number
+  cost_usd: number
+  priced_count: number
   avg_duration_ms: number | null
 }
 export type SummaryResp = { data: SummaryRow[]; group_by: string }
@@ -234,6 +255,7 @@ export type RequestRow = {
   total_tokens: number | null
   cache_read_tokens: number | null
   cache_write_tokens: number | null
+  cost_usd: number | null
   duration_ms: number | null
   error: string | null
 }
@@ -255,6 +277,50 @@ export const getRequests = (params: {
   })
   return request<RequestsResp>(`/requests?${qs}`)
 }
+
+// ---- models.dev catalog (admin suggestions) ----
+export type ModelsDevCost = ModelCost
+
+export type ModelsDevEntry = {
+  source_id: string
+  provider_id: string
+  provider_name: string
+  model_id: string
+  name: string
+  canonical_model_id?: string
+  context_window?: number
+  max_output_tokens?: number
+  cost?: ModelsDevCost
+  match_score?: number
+}
+
+export type ModelsDevStatus = {
+  ready: boolean
+  stale: boolean
+  disabled: boolean
+  fetched_at?: number
+  last_error?: string
+  provider_count?: number
+  model_count?: number
+  base_url?: string
+}
+
+export type ModelsDevResp = { items: ModelsDevEntry[]; status: ModelsDevStatus }
+
+export const searchModelsDev = (params: { q?: string; provider?: string; limit?: number }) => {
+  const qs = new URLSearchParams()
+  Object.entries(params).forEach(([k, v]) => { if (v != null && v !== '') qs.set(k, String(v)) })
+  return request<ModelsDevResp>(`/modelsdev/search?${qs}`)
+}
+
+export const suggestModelsDev = (params: { model: string; provider?: string; limit?: number }) => {
+  const qs = new URLSearchParams()
+  Object.entries(params).forEach(([k, v]) => { if (v != null && v !== '') qs.set(k, String(v)) })
+  return request<ModelsDevResp>(`/modelsdev/suggest?${qs}`)
+}
+
+export const refreshModelsDev = () =>
+  request<{ status: ModelsDevStatus }>('/modelsdev/refresh', { method: 'POST' })
 
 // ---- Info ----
 export type InfoCombo = {

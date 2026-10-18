@@ -1247,3 +1247,115 @@ mcp_providers:
 		t.Fatalf("unexpected api_key auth: %#v", ak.Auth)
 	}
 }
+
+func TestComboMemberParamsAndModelsDevRoundtrip(t *testing.T) {
+	const raw = `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+general:
+  models_dev:
+    base_url: "http://localhost:9999/"
+    timeout_seconds: 5
+    cache_ttl_seconds: 120
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+        context_window: 131072
+        max_output_tokens: 8192
+        cost:
+          input: 0.27
+          output: 1.1
+          cache_read: 0
+        models_dev_source: deepseek/deepseek-chat
+`
+	cfg := loadFromText(t, raw)
+	md := cfg.General.ModelsDev
+	if md == nil || md.BaseURL != "http://localhost:9999" || md.TimeoutSeconds != 5 || md.CacheTTLSeconds != 120 {
+		t.Fatalf("unexpected models_dev config: %+v", md)
+	}
+	m := cfg.Combos[0].Members[0]
+	if m.ContextWindow == nil || *m.ContextWindow != 131072 {
+		t.Fatalf("context_window = %v", m.ContextWindow)
+	}
+	if m.MaxOutputTokens == nil || *m.MaxOutputTokens != 8192 {
+		t.Fatalf("max_output_tokens = %v", m.MaxOutputTokens)
+	}
+	if m.Cost == nil || m.Cost.Input == nil || *m.Cost.Input != 0.27 {
+		t.Fatalf("cost = %+v", m.Cost)
+	}
+	// Explicit zero must survive as a present (free) price, not nil.
+	if m.Cost.CacheRead == nil || *m.Cost.CacheRead != 0 {
+		t.Fatalf("cache_read = %v, want explicit 0", m.Cost.CacheRead)
+	}
+	if m.Cost.CacheWrite != nil {
+		t.Fatalf("cache_write should be nil, got %v", *m.Cost.CacheWrite)
+	}
+	if m.ModelsDevSource != "deepseek/deepseek-chat" {
+		t.Fatalf("source = %q", m.ModelsDevSource)
+	}
+
+	rebuilt, err := Build(Dump(cfg))
+	if err != nil {
+		t.Fatalf("rebuild from dump: %v", err)
+	}
+	rm := rebuilt.Combos[0].Members[0]
+	if rm.ContextWindow == nil || *rm.ContextWindow != 131072 ||
+		rm.MaxOutputTokens == nil || *rm.MaxOutputTokens != 8192 ||
+		rm.Cost == nil || rm.Cost.CacheRead == nil || *rm.Cost.CacheRead != 0 ||
+		rm.ModelsDevSource != "deepseek/deepseek-chat" {
+		t.Fatalf("roundtrip lost member metadata: %+v", rm)
+	}
+	if rebuilt.General.ModelsDev == nil || rebuilt.General.ModelsDev.CacheTTLSeconds != 120 {
+		t.Fatalf("roundtrip lost models_dev config: %+v", rebuilt.General.ModelsDev)
+	}
+}
+
+func TestRejectsInvalidMemberParams(t *testing.T) {
+	cases := []struct {
+		name    string
+		member  string
+		wantErr bool
+	}{
+		{"negative price", "        cost:\n          input: -1\n", true},
+		{"nan price", "        cost:\n          output: .nan\n", true},
+		{"zero context", "        context_window: 0\n", true},
+		{"fractional context", "        context_window: 1.5\n", true},
+		{"zero max output", "        max_output_tokens: 0\n", true},
+		{"trailing garbage context", "        context_window: \"131072abc\"\n", true},
+		{"valid free price", "        cost:\n          input: 0\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+` + tc.member
+			_, err := loadFromTextErr(t, raw)
+			if tc.wantErr && err == nil {
+				t.Fatal("expected validation error")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}

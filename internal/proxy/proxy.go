@@ -286,7 +286,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 				km.RecordError(key, model, matched.CooldownSeconds)
 				log.Printf("Rotation: provider=%s key=%.8s model=%s rule=%q cooldown=%ds",
 					providerName, key, model, matched.Description, matched.CooldownSeconds)
-				s.record(requestedModel, providerName, model, key, apiFormat,
+				s.record(requestedModel, providerName, model, key, apiFormat, upstreamFmt,
 					isStream, nil, false, matched.Description,
 					map[string]any{}, t0, nil, &matchedPayload)
 				continue
@@ -348,7 +348,7 @@ func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Reque
 
 	resp, err := s.clientFor(providerName).Do(req)
 	if err != nil {
-		return s.networkError(w, t0, err, km, providerName, model, false, combo, key, clientAPIFormat, matchedPayload), nil
+		return s.networkError(w, t0, err, km, providerName, model, false, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload), nil
 	}
 	defer resp.Body.Close()
 
@@ -363,7 +363,7 @@ func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Reque
 		}
 		usage := map[string]any{}
 		errText := extractErrorText(rawBody)
-		s.record(combo, providerName, model, key, clientAPIFormat, false, &statusCode, false, "", usage, t0, &errText, &matchedPayload)
+		s.record(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, false, &statusCode, false, "", usage, t0, &errText, &matchedPayload)
 		// For error responses, don't run the upstream→client translator: format
 		// translators are built for success-shaped bodies (e.g. openai "choices" or
 		// codex "response.completed") and, given an error body, may silently return
@@ -409,7 +409,7 @@ func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	s.record(combo, providerName, model, key, clientAPIFormat, false, &statusCode, true, "", usage, t0, nil, &matchedPayload)
+	s.record(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, false, &statusCode, true, "", usage, t0, nil, &matchedPayload)
 
 	if clientCtx != nil && upstreamCtx != nil {
 		s.reportLog(combo, providerName, model, clientAPIFormat, false, statusCode, true,
@@ -513,7 +513,7 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, r *http.Request, t0
 	client := s.clientFor(providerName)
 	resp, err := client.Do(req)
 	if err != nil {
-		return s.networkError(w, t0, err, km, providerName, model, false, combo, key, clientAPIFormat, matchedPayload), nil
+		return s.networkError(w, t0, err, km, providerName, model, false, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload), nil
 	}
 	defer resp.Body.Close()
 	respBody, _ := io.ReadAll(resp.Body)
@@ -571,7 +571,7 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, r *http.Request, t0
 		t := extractErrorText(respBody)
 		errText = &t
 	}
-	s.record(combo, providerName, model, key, clientAPIFormat, false, &statusCode, httpOK, "", usage, t0, errText, &matchedPayload)
+	s.record(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, false, &statusCode, httpOK, "", usage, t0, errText, &matchedPayload)
 
 	// Verbose logging.
 	if clientCtx != nil && upstreamCtx != nil {
@@ -591,7 +591,7 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, r *http.Request, t0
 }
 
 func (s *Service) networkError(w http.ResponseWriter, t0 time.Time, err error, km *keys.Manager,
-	providerName, model string, isStream bool, combo, key, apiFormat, matchedPayload string) bool {
+	providerName, model string, isStream bool, combo, key, apiFormat, upstreamAPIFormat, matchedPayload string) bool {
 	var netErr net.Error
 	var statusCode int
 	var msg string
@@ -602,7 +602,7 @@ func (s *Service) networkError(w http.ResponseWriter, t0 time.Time, err error, k
 		statusCode = 502
 		msg = "upstream connection failed"
 	}
-	s.record(combo, providerName, model, key, apiFormat, isStream, &statusCode, false, "", map[string]any{}, t0, &msg, &matchedPayload)
+	s.record(combo, providerName, model, key, apiFormat, upstreamAPIFormat, isStream, &statusCode, false, "", map[string]any{}, t0, &msg, &matchedPayload)
 	jsonErrorForFormat(w, apiFormat, statusCode, msg, "proxy_error")
 	return true
 }
@@ -904,7 +904,7 @@ func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http
 //
 // Known variants:
 //   - "reasoning"  (sensenova, some other providers)
-//   → "reasoning_content"  (DeepSeek / CLIProxyAPI standard)
+//     → "reasoning_content"  (DeepSeek / CLIProxyAPI standard)
 //
 // Handles both non-stream (choices[].message) and stream (choices[].delta).
 func normalizeOpenAIReasoningField(body []byte) []byte {

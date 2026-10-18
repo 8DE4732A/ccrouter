@@ -17,6 +17,7 @@ import (
 	"ccrouter/internal/db"
 	"ccrouter/internal/keys"
 	mcpGateway "ccrouter/internal/mcp/gateway"
+	"ccrouter/internal/modelsdev"
 	proxyPkg "ccrouter/internal/proxy"
 	"ccrouter/internal/report"
 )
@@ -32,6 +33,7 @@ type State struct {
 	recorder   *db.Recorder
 	report     *report.Logger
 	mcp        *mcpGateway.Gateway
+	modelsDev  *modelsdev.Client
 }
 
 // New creates a State from config, building key managers and the proxy service.
@@ -54,7 +56,30 @@ func New(cfg *config.AppConfig, configPath string, rec *db.Recorder, rl *report.
 		recorder:   rec,
 		report:     rl,
 		mcp:        mcpGw,
+		modelsDev:  modelsdev.New(modelsDevOptions(cfg)),
 	}, nil
+}
+
+// modelsDevOptions maps general.models_dev onto catalog client options,
+// reusing the global proxy settings for the outbound fetch.
+func modelsDevOptions(cfg *config.AppConfig) modelsdev.Options {
+	// Zero values are intentionally left unset: modelsdev.Options.withDefaults
+	// is the single source of default base URL, timeout, and TTL.
+	opts := modelsdev.Options{}
+	timeout := modelsdev.DefaultTimeout
+	if md := cfg.General.ModelsDev; md != nil {
+		opts.Disabled = md.Disabled
+		opts.BaseURL = md.BaseURL
+		if md.TimeoutSeconds > 0 {
+			opts.Timeout = time.Duration(md.TimeoutSeconds) * time.Second
+			timeout = opts.Timeout
+		}
+		if md.CacheTTLSeconds > 0 {
+			opts.TTL = time.Duration(md.CacheTTLSeconds) * time.Second
+		}
+	}
+	opts.HTTPClient = buildProxyClient(cfg.General.Proxy, nil, timeout)
+	return opts
 }
 
 // defaultRequestTimeout is the upstream request timeout when none is configured.
@@ -192,6 +217,9 @@ func (s *State) Recorder() *db.Recorder { return s.recorder }
 // Report returns the report logger.
 func (s *State) Report() *report.Logger { return s.report }
 
+// ModelsDev returns the models.dev catalog client.
+func (s *State) ModelsDev() *modelsdev.Client { return s.modelsDev }
+
 // ConfigPath returns the config file path.
 func (s *State) ConfigPath() string { return s.configPath }
 
@@ -199,6 +227,9 @@ func (s *State) ConfigPath() string { return s.configPath }
 func (s *State) Reload(newConfig *config.AppConfig) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.modelsDev != nil {
+		s.modelsDev.Reconfigure(modelsDevOptions(newConfig))
+	}
 	if s.report != nil {
 		logDir := config.ResolveLogDir(s.configPath, newConfig.Logging.Dir)
 		if err := s.report.Reconfigure(report.Options{
@@ -258,5 +289,8 @@ func (s *State) Close() {
 	}
 	if s.mcp != nil {
 		s.mcp.Close()
+	}
+	if s.modelsDev != nil {
+		s.modelsDev.Close()
 	}
 }

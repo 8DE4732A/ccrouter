@@ -158,6 +158,21 @@ ComboMember:
                                   # 翻译通过 CLIProxyAPI translator 完成，支持：
                                   #   openai ↔ anthropic、openai ↔ gemini 等互转
                                   # 翻译标记记录在请求明细 matched_payload 字段（如 anthropic→openai）
+  context_window:      [int]      # 可选：模型上下文窗口（tokens），管理端展示用
+  max_output_tokens:   [int]      # 可选：模型最大输出 tokens
+  cost:                [ComboMemberCost]
+                                  # 可选：价格（USD / 1M tokens），用于计算每次请求的消费金额
+                                  # 显式 0 表示免费；省略表示未知：若请求实际消耗了该类 token
+                                  # 但价格未知，该请求金额记为未知（NULL），不会按 0 低估
+                                  # 注意：从 models.dev 自动填充时只快照基础档位价格，
+                                  # 阶梯定价（cost.tiers / context_over_200k）不会被展开
+  models_dev_source:   [string]   # 可选：来自 models.dev 的条目 ID（<provider>/<model>），仅作来源标记
+
+ComboMemberCost:
+  input:               [float]    # 输入 tokens 单价（USD / 1M）
+  output:              [float]    # 输出 tokens 单价（USD / 1M）
+  cache_read:          [float]    # 缓存读取 tokens 单价（USD / 1M）
+  cache_write:         [float]    # 缓存写入 tokens 单价（USD / 1M）
 
 
 # ===========================================================================
@@ -236,6 +251,24 @@ GeneralConfig:
                            # 管理控制台（Web UI 及 /admin/api/*）登录密码；若未配置或为空则无需认证
   external_url:            [string, default=""]
                            # 网关对外公开 Base URL（如 https://gateway.example.com）；用于反代环境下拼装完整可点击的 OAuth 授权链接与回调地址
+  models_dev:              [ModelsDevConfig, default=null]
+                           # models.dev 模型目录客户端；仅用于管理端搜索与自动填充，不影响代理和计费
+
+# ===========================================================================
+# ModelsDevConfig
+# ===========================================================================
+# models.dev 目录（https://models.dev/api.json）客户端配置。
+# 目录数据只用于管理界面建议；选中值会快照到 ComboMember，因此目录不可用不影响计费。
+
+ModelsDevConfig:
+  disabled:                [bool, default=false]
+                           # 是否禁用目录请求；禁用后仍可手动填写模型参数
+  base_url:                [string, default="https://models.dev"]
+                           # 目录服务地址；可指向本地镜像
+  timeout_seconds:         [int, default=10]
+                           # 拉取目录的超时时间（秒）
+  cache_ttl_seconds:       [int, default=3600]
+                           # 目录缓存有效期（秒），过期后后台刷新
 
 # ===========================================================================
 # LoggingConfig

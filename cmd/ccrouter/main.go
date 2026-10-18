@@ -86,6 +86,10 @@ func main() {
 		log.Fatalf("Gateway init failed: %v", err)
 	}
 
+	// Warm the models.dev catalog in the background. Failure only degrades
+	// admin suggestions; cost calculation uses prices stored in the config.
+	st.ModelsDev().Start()
+
 	router := server.Router(st)
 	addr := fmt.Sprintf("%s:%d", *host, *port)
 	srv := &http.Server{

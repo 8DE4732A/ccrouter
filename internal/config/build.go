@@ -2,7 +2,9 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -293,6 +295,38 @@ func buildConfig(raw map[string]any) (*AppConfig, error) {
 			cfg.General.ExternalURL = strings.TrimRight(strings.TrimSpace(strVal(eu)), "/")
 		} else if bu, ok := gm["base_url"]; ok {
 			cfg.General.ExternalURL = strings.TrimRight(strings.TrimSpace(strVal(bu)), "/")
+		}
+		// models_dev: optional catalog client used for admin suggestions.
+		if mv, ok := gm["models_dev"]; ok && mv != nil {
+			mm, err := asMap(mv, "general.models_dev")
+			if err != nil {
+				return nil, err
+			}
+			md := &ModelsDevConfig{
+				Disabled: toBool(mm["disabled"]),
+				BaseURL:  strings.TrimRight(strings.TrimSpace(strVal(mm["base_url"])), "/"),
+			}
+			if tv, ok := mm["timeout_seconds"]; ok {
+				p, err := optPositiveInt(tv, "'general.models_dev.timeout_seconds'")
+				if err != nil {
+					return nil, err
+				}
+				if *p > 600 {
+					return nil, errf("'general.models_dev.timeout_seconds' must be <= 600, got %d", *p)
+				}
+				md.TimeoutSeconds = *p
+			}
+			if tv, ok := mm["cache_ttl_seconds"]; ok {
+				p, err := optPositiveInt(tv, "'general.models_dev.cache_ttl_seconds'")
+				if err != nil {
+					return nil, err
+				}
+				if *p > 86400 {
+					return nil, errf("'general.models_dev.cache_ttl_seconds' must be <= 86400, got %d", *p)
+				}
+				md.CacheTTLSeconds = *p
+			}
+			cfg.General.ModelsDev = md
 		}
 	}
 
@@ -662,7 +696,8 @@ func buildCombo(c map[string]any, ctx string, providerMap map[string]*ProviderCo
 		return nil, errf("%s must contain at least one entry in 'members'", ctx)
 	}
 	for j, mv := range membersRaw {
-		mm, err := asMap(mv, fmt.Sprintf("%s.members[%d]", ctx, j))
+		memberCtx := fmt.Sprintf("%s.members[%d]", ctx, j)
+		mm, err := asMap(mv, memberCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -696,7 +731,50 @@ func buildCombo(c map[string]any, ctx string, providerMap map[string]*ProviderCo
 		// have a fallback endpoint. No need to check each client format here — translation
 		// covers the gap at request time.
 
-		cc.Members = append(cc.Members, ComboMember{Provider: providerName, Model: model, UpstreamAPIFormat: upstreamFmt})
+		member := ComboMember{Provider: providerName, Model: model, UpstreamAPIFormat: upstreamFmt}
+		if v, ok := mm["context_window"]; ok {
+			p, err := optPositiveInt(v, memberCtx+".context_window")
+			if err != nil {
+				return nil, err
+			}
+			member.ContextWindow = p
+		}
+		if v, ok := mm["max_output_tokens"]; ok {
+			p, err := optPositiveInt(v, memberCtx+".max_output_tokens")
+			if err != nil {
+				return nil, err
+			}
+			member.MaxOutputTokens = p
+		}
+		if cv, ok := mm["cost"]; ok && cv != nil {
+			cm, err := asMap(cv, memberCtx+".cost")
+			if err != nil {
+				return nil, err
+			}
+			cost := &ComboMemberCost{}
+			for _, f := range []struct {
+				name string
+				dst  **float64
+			}{
+				{"input", &cost.Input},
+				{"output", &cost.Output},
+				{"cache_read", &cost.CacheRead},
+				{"cache_write", &cost.CacheWrite},
+			} {
+				if v, ok := cm[f.name]; ok {
+					p, err := optNonNegativeFloat(v, memberCtx+".cost."+f.name)
+					if err != nil {
+						return nil, err
+					}
+					*f.dst = p
+				}
+			}
+			if !cost.Empty() {
+				member.Cost = cost
+			}
+		}
+		member.ModelsDevSource = strings.TrimSpace(strVal(mm["models_dev_source"]))
+		cc.Members = append(cc.Members, member)
 	}
 
 	comboNames[name] = true
@@ -730,20 +808,11 @@ func toBoolDefault(v any, def bool) bool {
 }
 
 func intDefault(v any, def int) int {
-	switch t := v.(type) {
-	case int:
-		return t
-	case int64:
-		return int(t)
-	case float64:
-		return int(t)
-	case string:
-		var n int
-		if _, err := fmt.Sscanf(t, "%d", &n); err == nil {
-			return n
-		}
+	f, ok := numberValue(v)
+	if !ok {
+		return def
 	}
-	return def
+	return int(f)
 }
 
 func strVal(v any) string {
@@ -751,6 +820,48 @@ func strVal(v any) string {
 		return s
 	}
 	return ""
+}
+
+// numberValue converts YAML/JSON numeric values (and numeric strings) to
+// float64 for validation helpers.
+func numberValue(v any) (float64, bool) {
+	switch t := v.(type) {
+	case int:
+		return float64(t), true
+	case int64:
+		return float64(t), true
+	case float64:
+		return t, true
+	case string:
+		// ParseFloat requires the entire string to be numeric, unlike
+		// fmt.Sscanf which silently accepts trailing garbage.
+		f, err := strconv.ParseFloat(strings.TrimSpace(t), 64)
+		if err == nil {
+			return f, true
+		}
+	}
+	return 0, false
+}
+
+// optPositiveInt parses an optional positive integer, rejecting fractional,
+// non-numeric, and out-of-range values.
+func optPositiveInt(v any, ctx string) (*int, error) {
+	f, ok := numberValue(v)
+	if !ok || math.IsNaN(f) || math.IsInf(f, 0) || f <= 0 || f != math.Trunc(f) || f > math.MaxInt32 {
+		return nil, errf("%s must be a positive integer", ctx)
+	}
+	i := int(f)
+	return &i, nil
+}
+
+// optNonNegativeFloat parses an optional non-negative price, rejecting NaN,
+// infinities, and negative values. Explicit 0 is allowed (free).
+func optNonNegativeFloat(v any, ctx string) (*float64, error) {
+	f, ok := numberValue(v)
+	if !ok || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+		return nil, errf("%s must be a non-negative number", ctx)
+	}
+	return &f, nil
 }
 
 func stringDefault(s, def string) string {

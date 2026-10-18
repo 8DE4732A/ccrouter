@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { getRequests } from '../api/client'
 import type { RequestRow } from '../api/client'
+import { fmtUSD } from '../format'
 
 const PAGE_SIZE = 30
 
@@ -88,6 +89,7 @@ export default function Requests() {
               <th>Compl T</th>
               <th>Cache R</th>
               <th>Cache W</th>
+              <th>费用 (USD)</th>
               <th>耗时</th>
               <th>轮换规则</th>
               <th>Payload 改写</th>
@@ -95,7 +97,7 @@ export default function Requests() {
           </thead>
           <tbody>
             {rows.length === 0 && (
-              <tr><td colSpan={13} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 32 }}>暂无数据</td></tr>
+              <tr><td colSpan={15} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 32 }}>暂无数据</td></tr>
             )}
             {rows.map(r => (
               <tr key={r.id} className={r.success ? '' : 'row-err'}>
@@ -123,6 +125,9 @@ export default function Requests() {
                 </td>
                 <td style={{ color: r.cache_write_tokens ? 'var(--warn-fg)' : undefined }}>
                   {r.cache_write_tokens ?? '—'}
+                </td>
+                <td style={{ fontFamily: 'var(--font-mono)', color: r.cost_usd != null ? 'var(--text)' : 'var(--text-3)' }}>
+                  {fmtUSD(r.cost_usd)}
                 </td>
                 <td className="text-muted">{r.duration_ms != null ? r.duration_ms + ' ms' : '—'}</td>
                 <td style={{ fontSize: 12, maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-2)' }}>

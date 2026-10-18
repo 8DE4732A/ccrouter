@@ -84,6 +84,16 @@ combos:
         members:
           - provider: sensenova
             model: "deepseek-v4-flash"
+            # 可选：模型元数据与价格，管理界面可从 models.dev 自动填充。
+            # 价格单位 USD / 1M tokens；显式 0 表示免费，省略表示未知。
+            # context_window: 131072
+            # max_output_tokens: 8192
+            # cost:
+            #   input: 0.27
+            #   output: 1.10
+            #   cache_read: 0.07
+            #   cache_write: 0
+            # models_dev_source: deepseek/deepseek-chat
           - provider: deepseek           # sensenova 耗尽后的备用
             model: "deepseek-chat"
 

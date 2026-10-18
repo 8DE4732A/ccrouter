@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -461,5 +462,43 @@ func TestReconfigureMaxBytesRotate(t *testing.T) {
 	archive := filepath.Join(dir, segmentFilename+".1")
 	if _, err := os.Stat(archive); err != nil {
 		t.Fatalf("expected archived segment %s to exist after reconfigure rotation", archive)
+	}
+}
+
+// TestReadEarlyStopDoesNotLeak guards against a regression where Read/ReadOne
+// stopped consuming their iterator early (once they had enough records) while
+// the producer goroutine blocked forever on its channel send. Each leaked
+// producer held an open file handle and a fully decoded checkpoint group,
+// so repeated log-page views steadily grew memory usage.
+func TestReadEarlyStopDoesNotLeak(t *testing.T) {
+	dir := t.TempDir()
+	l, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+
+	for i := 0; i < 50; i++ {
+		l.Log(map[string]any{"ts": float64(i), "n": i})
+	}
+	l.Flush()
+
+	// Flush is synchronous: the writer goroutine is already running and stays
+	// alive until Close, so the baseline is stable right away.
+	baseline := runtime.NumGoroutine()
+
+	for i := 0; i < 20; i++ {
+		if _, err := l.Read(1, 0, nil); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := l.ReadOne(float64(49 - i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Iteration is synchronous, so an early stop unwinds immediately; no
+	// producer goroutine may survive it.
+	if n := runtime.NumGoroutine(); n > baseline {
+		t.Fatalf("leaked %d goroutines after early-stopped reads", n-baseline)
 	}
 }

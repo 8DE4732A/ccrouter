@@ -56,7 +56,6 @@ func NewRouter(combos []config.ComboConfig) *Router {
 	return r
 }
 
-
 func (r *Router) resolve(name string) string {
 	if canon, ok := r.aliases[name]; ok {
 		return canon
@@ -114,6 +113,24 @@ func (r *Router) NextMemberWithFmt(name string, attempted map[[2]string]bool) (s
 		}
 	}
 	return "", "", ""
+}
+
+// Member returns the configured member for a (provider, model) pair,
+// resolving combo aliases the same way NextMemberWithFmt does. The first
+// matching member wins when a combo repeats a pair (routing already treats
+// repeated pairs as one attempt). combos is immutable after NewRouter, so no
+// lock is needed.
+func (r *Router) Member(name, provider, model string) (*config.ComboMember, bool) {
+	c := r.combos[r.resolve(name)]
+	if c == nil {
+		return nil, false
+	}
+	for i := range c.Members {
+		if c.Members[i].Provider == provider && c.Members[i].Model == model {
+			return &c.Members[i], true
+		}
+	}
+	return nil, false
 }
 
 // List returns canonical combo names (aliases are transparent shortcuts).

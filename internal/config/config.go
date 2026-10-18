@@ -46,6 +46,19 @@ type GeneralConfig struct {
 	// ExternalURL is the public base URL of ccrouter (e.g. "https://gateway.example.com" or "http://localhost:8000").
 	// Used for generating absolute OAuth callback and authorization URLs behind reverse proxies.
 	ExternalURL string `json:"external_url,omitempty" yaml:"external_url,omitempty"`
+
+	// ModelsDev configures the optional models.dev catalog client used by the
+	// admin UI to suggest context limits and pricing for combo members.
+	// Cost calculation itself never depends on this catalog.
+	ModelsDev *ModelsDevConfig `json:"models_dev,omitempty" yaml:"models_dev,omitempty"`
+}
+
+// ModelsDevConfig configures the models.dev catalog client.
+type ModelsDevConfig struct {
+	Disabled        bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"`
+	BaseURL         string `json:"base_url,omitempty" yaml:"base_url,omitempty"`                   // default https://models.dev
+	TimeoutSeconds  int    `json:"timeout_seconds,omitempty" yaml:"timeout_seconds,omitempty"`     // default 10
+	CacheTTLSeconds int    `json:"cache_ttl_seconds,omitempty" yaml:"cache_ttl_seconds,omitempty"` // default 3600
 }
 
 // RequestTimeoutDisabled is the sentinel value for GeneralConfig.RequestTimeoutSeconds
@@ -201,6 +214,22 @@ func (p *ProviderConfig) GetBaseURL(fmt string) string {
 	return ""
 }
 
+// ComboMemberCost holds the USD prices per 1M tokens for a combo member's
+// model. A nil field means the price is unknown; an explicit 0 means the
+// category is free. Having any price makes per-request cost calculation
+// possible; nil prices simply contribute 0 to the total.
+type ComboMemberCost struct {
+	Input      *float64 `json:"input,omitempty" yaml:"input,omitempty"`
+	Output     *float64 `json:"output,omitempty" yaml:"output,omitempty"`
+	CacheRead  *float64 `json:"cache_read,omitempty" yaml:"cache_read,omitempty"`
+	CacheWrite *float64 `json:"cache_write,omitempty" yaml:"cache_write,omitempty"`
+}
+
+// Empty reports whether no price is configured at all.
+func (c *ComboMemberCost) Empty() bool {
+	return c == nil || (c.Input == nil && c.Output == nil && c.CacheRead == nil && c.CacheWrite == nil)
+}
+
 type ComboMember struct {
 	Provider string `json:"provider" yaml:"provider"`
 	Model    string `json:"model" yaml:"model"`
@@ -210,6 +239,16 @@ type ComboMember struct {
 	// Example: combo accepts "anthropic" but this member's provider only speaks "openai" —
 	// set upstream_api_format: openai and the translation happens automatically.
 	UpstreamAPIFormat string `json:"upstream_api_format,omitempty" yaml:"upstream_api_format,omitempty"`
+
+	// Model metadata, normally filled from models.dev but freely editable.
+	// ContextWindow is the model's context window in tokens; MaxOutputTokens
+	// is the maximum output tokens. Both are advisory metadata for the admin UI.
+	ContextWindow   *int             `json:"context_window,omitempty" yaml:"context_window,omitempty"`
+	MaxOutputTokens *int             `json:"max_output_tokens,omitempty" yaml:"max_output_tokens,omitempty"`
+	Cost            *ComboMemberCost `json:"cost,omitempty" yaml:"cost,omitempty"`
+	// ModelsDevSource records the catalog entry these values came from, as
+	// "<models.dev provider id>/<model id>". Informational only.
+	ModelsDevSource string `json:"models_dev_source,omitempty" yaml:"models_dev_source,omitempty"`
 }
 
 type ComboConfig struct {

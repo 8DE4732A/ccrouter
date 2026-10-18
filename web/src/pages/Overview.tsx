@@ -4,6 +4,7 @@ import {
 } from 'recharts'
 import { getStatsKeys, getStatsSummary, getStatsTrend } from '../api/client'
 import type { KeysStatus, SummaryRow, TrendRow } from '../api/client'
+import { fmtUSD } from '../format'
 
 function fmtTs(ts: number, bucket: string) {
   if (bucket === 'minute') {
@@ -102,6 +103,8 @@ export default function Overview() {
   const totalTokens = summary.reduce((s, r) => s + (r.total_tokens ?? 0), 0)
   const totalCacheRead = summary.reduce((s, r) => s + (r.cache_read_tokens ?? 0), 0)
   const totalCacheWrite = summary.reduce((s, r) => s + (r.cache_write_tokens ?? 0), 0)
+  const totalCost = summary.reduce((s, r) => s + (r.cost_usd ?? 0), 0)
+  const pricedReqs = summary.reduce((s, r) => s + (r.priced_count ?? 0), 0)
   const avgDur = summary.length
     ? Math.round(summary.reduce((s, r) => s + (r.avg_duration_ms ?? 0), 0) / summary.length)
     : null
@@ -144,6 +147,15 @@ export default function Overview() {
           <div className="stat-label">Token 消耗</div>
           <div className="stat-value">{fmtNum(totalTokens)}</div>
           <div className="stat-sub">所有 combo 合计</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">总费用 (USD)</div>
+          <div className="stat-value" style={{ color: totalCost > 0 ? 'var(--warn-fg)' : undefined }}>
+            {pricedReqs > 0 ? fmtUSD(totalCost) : '—'}
+          </div>
+          <div className="stat-sub">
+            {pricedReqs > 0 ? `${fmtNum(pricedReqs)} 条已定价请求` : '尚无已配置价格的请求'}
+          </div>
         </div>
         <div className="stat-card">
           <div className="stat-label">Cache Read Tokens</div>
@@ -224,12 +236,13 @@ export default function Overview() {
                 <th>Compl T</th>
                 <th>Cache R</th>
                 <th>Cache W</th>
+                <th>费用 (USD)</th>
                 <th>平均耗时</th>
               </tr>
             </thead>
             <tbody>
               {summary.length === 0 && (
-                <tr><td colSpan={10} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 24 }}>暂无数据</td></tr>
+                <tr><td colSpan={11} style={{ textAlign: 'center', color: 'var(--text-3)', padding: 24 }}>暂无数据</td></tr>
               )}
               {summary.map(row => (
                 <tr key={row.group_key ?? '(null)'}>
@@ -245,6 +258,9 @@ export default function Overview() {
                   </td>
                   <td style={{ color: row.cache_write_tokens > 0 ? 'var(--warn-fg)' : 'var(--text-3)' }}>
                     {row.cache_write_tokens > 0 ? row.cache_write_tokens.toLocaleString() : '—'}
+                  </td>
+                  <td style={{ color: row.priced_count > 0 ? 'var(--text)' : 'var(--text-3)', fontFamily: 'var(--font-mono)' }}>
+                    {row.priced_count > 0 ? fmtUSD(row.cost_usd) : '—'}
                   </td>
                   <td>{row.avg_duration_ms != null ? Math.round(row.avg_duration_ms) + ' ms' : '—'}</td>
                 </tr>

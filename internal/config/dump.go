@@ -40,6 +40,22 @@ func Dump(cfg *AppConfig) map[string]any {
 	if cfg.General.ExternalURL != "" {
 		general["external_url"] = cfg.General.ExternalURL
 	}
+	if md := cfg.General.ModelsDev; md != nil {
+		mm := map[string]any{}
+		if md.Disabled {
+			mm["disabled"] = true
+		}
+		if md.BaseURL != "" {
+			mm["base_url"] = md.BaseURL
+		}
+		if md.TimeoutSeconds > 0 {
+			mm["timeout_seconds"] = md.TimeoutSeconds
+		}
+		if md.CacheTTLSeconds > 0 {
+			mm["cache_ttl_seconds"] = md.CacheTTLSeconds
+		}
+		general["models_dev"] = mm
+	}
 
 	providers := make([]any, 0, len(cfg.Providers))
 	for _, p := range cfg.Providers {
@@ -120,6 +136,33 @@ func Dump(cfg *AppConfig) map[string]any {
 			mm := map[string]any{"provider": m.Provider, "model": m.Model}
 			if m.UpstreamAPIFormat != "" {
 				mm["upstream_api_format"] = m.UpstreamAPIFormat
+			}
+			if m.ContextWindow != nil {
+				mm["context_window"] = *m.ContextWindow
+			}
+			if m.MaxOutputTokens != nil {
+				mm["max_output_tokens"] = *m.MaxOutputTokens
+			}
+			if m.Cost != nil {
+				cm := map[string]any{}
+				if m.Cost.Input != nil {
+					cm["input"] = *m.Cost.Input
+				}
+				if m.Cost.Output != nil {
+					cm["output"] = *m.Cost.Output
+				}
+				if m.Cost.CacheRead != nil {
+					cm["cache_read"] = *m.Cost.CacheRead
+				}
+				if m.Cost.CacheWrite != nil {
+					cm["cache_write"] = *m.Cost.CacheWrite
+				}
+				if len(cm) > 0 {
+					mm["cost"] = cm
+				}
+			}
+			if m.ModelsDevSource != "" {
+				mm["models_dev_source"] = m.ModelsDevSource
 			}
 			members = append(members, mm)
 		}

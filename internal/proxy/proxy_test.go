@@ -301,11 +301,11 @@ func TestHTTPStatusCodeRuleRotatesOn429(t *testing.T) {
 
 	cfg := &config.AppConfig{
 		Providers: []config.ProviderConfig{{
-			Name:             "sn",
-			APIs:             []config.ApiEndpoint{{APIFormat: "openai", BaseURL: up.URL}},
-			MaxRetries:       3,
-			KeyStrategy:      "fill-first",
-			Keys:             []config.KeyConfig{{Key: "key-1"}, {Key: "key-2"}},
+			Name:        "sn",
+			APIs:        []config.ApiEndpoint{{APIFormat: "openai", BaseURL: up.URL}},
+			MaxRetries:  3,
+			KeyStrategy: "fill-first",
+			Keys:        []config.KeyConfig{{Key: "key-1"}, {Key: "key-2"}},
 			HealthCheckRules: []config.HealthCheckRule{{
 				Description:     "any 429",
 				HTTPStatusCodes: []int{429},
@@ -945,5 +945,94 @@ func TestImageEditsProxyMultipart(t *testing.T) {
 	}
 }
 
+func newCostTestService(t *testing.T, upstreamJSON string, memberCost *config.ComboMemberCost) (*Service, string, *db.Recorder) {
+	t.Helper()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, upstreamJSON)
+	}))
+	t.Cleanup(upstream.Close)
 
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	recorder, err := db.NewRecorder(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(recorder.Close)
 
+	cfg := &config.AppConfig{
+		Providers: []config.ProviderConfig{{
+			Name:             "sn",
+			APIs:             []config.ApiEndpoint{{APIFormat: "openai", BaseURL: upstream.URL}},
+			MaxRetries:       1,
+			KeyStrategy:      "fill-first",
+			Keys:             []config.KeyConfig{{Key: "sk-1"}},
+			HealthCheckRules: []config.HealthCheckRule{},
+		}},
+		Combos: []config.ComboConfig{{
+			Name: "my-combo", APIFormat: "openai", Strategy: "fill-first",
+			Members: []config.ComboMember{{Provider: "sn", Model: "m", Cost: memberCost}},
+		}},
+	}
+	kms := map[string]*keys.Manager{"sn": keys.NewManager("sn", []string{"sk-1"}, "fill-first")}
+	svc, err := New(cfg, kms, combos.NewRouter(cfg.Combos), map[string]*http.Client{}, recorder, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return svc, dbPath, recorder
+}
+
+func querySingleCost(t *testing.T, dbPath string) any {
+	t.Helper()
+	res, err := db.QueryList(dbPath, 10, 0, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := res["items"].([]map[string]any)
+	if len(items) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(items))
+	}
+	return items[0]["cost_usd"]
+}
+
+func TestNonStreamingRecordsCost(t *testing.T) {
+	f := func(v float64) *float64 { return &v }
+	svc, dbPath, recorder := newCostTestService(t,
+		`{"id":"x","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":40,"total_tokens":140,"prompt_tokens_details":{"cached_tokens":40}}}`,
+		&config.ComboMemberCost{Input: f(3), Output: f(15), CacheRead: f(0.3)},
+	)
+	resp := doRequest(t, svc, map[string]any{
+		"model":    "my-combo",
+		"messages": []any{map[string]any{"role": "user", "content": "hello"}},
+	})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", resp.Code, resp.Body.String())
+	}
+	recorder.Flush()
+
+	cost, ok := querySingleCost(t, dbPath).(float64)
+	if !ok {
+		t.Fatal("cost_usd missing from row")
+	}
+	// OpenAI prompt_tokens includes 40 cached tokens: bill 60 input + 40 cache read.
+	want := 60.0/1e6*3 + 40.0/1e6*15 + 40.0/1e6*0.3
+	if diff := cost - want; diff > 1e-12 || diff < -1e-12 {
+		t.Fatalf("cost = %v, want %v", cost, want)
+	}
+}
+
+func TestNonStreamingWithoutPriceLeavesCostNull(t *testing.T) {
+	svc, dbPath, recorder := newCostTestService(t,
+		`{"id":"x","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`,
+		nil,
+	)
+	resp := doRequest(t, svc, map[string]any{"model": "my-combo", "messages": []any{}})
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", resp.Code, resp.Body.String())
+	}
+	recorder.Flush()
+
+	if got := querySingleCost(t, dbPath); got != nil {
+		t.Fatalf("expected NULL cost, got %v", got)
+	}
+}

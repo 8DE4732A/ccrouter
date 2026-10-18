@@ -4,10 +4,13 @@ import (
 	"time"
 
 	"ccrouter/internal/db"
+	"ccrouter/internal/pricing"
 )
 
 // record enqueues a request row to the SQLite recorder (no-op when disabled).
-func (s *Service) record(combo, provider, model, key, apiFormat string, isStream bool,
+// upstreamAPIFormat is the format of the raw upstream response, which governs
+// cache-token semantics when computing cost.
+func (s *Service) record(combo, provider, model, key, apiFormat, upstreamAPIFormat string, isStream bool,
 	statusCode *int, success bool, matchedRule string, usage map[string]any, t0 time.Time,
 	errText *string, matchedPayload *string) {
 
@@ -27,6 +30,17 @@ func (s *Service) record(combo, provider, model, key, apiFormat string, isStream
 	if isStream {
 		streamInt = 1
 	}
+
+	var costUSD *float64
+	if s.Router != nil {
+		if member, ok := s.Router.Member(combo, provider, model); ok && !member.Cost.Empty() {
+			tok := pricing.Normalize(usage, upstreamAPIFormat)
+			if usd, ok := pricing.Compute(member.Cost, tok); ok {
+				costUSD = &usd
+			}
+		}
+	}
+
 	s.Recorder.Record(&db.Row{
 		TS:               float64(time.Now().UnixNano()) / 1e9,
 		Combo:            strPtr(combo),
@@ -43,6 +57,7 @@ func (s *Service) record(combo, provider, model, key, apiFormat string, isStream
 		TotalTokens:      intPtr(usage["total_tokens"]),
 		CacheReadTokens:  intPtr(usage["cache_read_tokens"]),
 		CacheWriteTokens: intPtr(usage["cache_write_tokens"]),
+		CostUSD:          costUSD,
 		DurationMs:       &dur,
 		Error:            errText,
 		MatchedPayload:   matchedPayload,

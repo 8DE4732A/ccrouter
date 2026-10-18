@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"math"
 	"path/filepath"
 	"testing"
 )
@@ -303,5 +305,88 @@ func TestMcpRecordAndQueryList(t *testing.T) {
 	}
 	if len(trend) == 0 {
 		t.Fatalf("expected trend data, got 0 rows")
+	}
+}
+
+func floatp(f float64) *float64 { return &f }
+
+func TestMigrationAddsCostColumn(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "old.db")
+
+	// Simulate a database created before the cost column existed.
+	conn, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = conn.Exec(`CREATE TABLE requests (
+	  id INTEGER PRIMARY KEY AUTOINCREMENT,
+	  ts REAL NOT NULL,
+	  combo TEXT, provider TEXT, model TEXT, key_prefix TEXT, api_format TEXT,
+	  is_stream INTEGER NOT NULL DEFAULT 0,
+	  status_code INTEGER, success INTEGER NOT NULL DEFAULT 0, matched_rule TEXT,
+	  prompt_tokens INTEGER, completion_tokens INTEGER, total_tokens INTEGER,
+	  cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+	  duration_ms INTEGER, error TEXT, matched_payload TEXT
+	);
+	INSERT INTO requests (ts, success, total_tokens) VALUES (1, 1, 10);`)
+	if err != nil {
+		conn.Close()
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	rec, err := NewRecorder(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Record(&Row{TS: 2, Success: 1, TotalTokens: intp(20), CostUSD: floatp(0.001)})
+	rec.Flush()
+	rec.Close()
+
+	res, err := QueryList(dbPath, 50, 0, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := res["items"].([]map[string]any)
+	if len(items) != 2 {
+		t.Fatalf("expected 2 rows, got %d", len(items))
+	}
+	// Newest first: priced row, then the historical row with NULL cost.
+	if items[0]["cost_usd"] != 0.001 {
+		t.Fatalf("new row cost = %v", items[0]["cost_usd"])
+	}
+	if items[1]["cost_usd"] != nil {
+		t.Fatalf("historical row cost should be NULL, got %v", items[1]["cost_usd"])
+	}
+}
+
+func TestQueryStatsCost(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "sense-roll.db")
+	rec, err := NewRecorder(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	rec.Record(&Row{TS: 1, Combo: strp("fast"), Success: 1, CostUSD: floatp(0.001)})
+	rec.Record(&Row{TS: 2, Combo: strp("fast"), Success: 1, CostUSD: floatp(0.002)})
+	rec.Record(&Row{TS: 3, Combo: strp("fast"), Success: 1})
+	rec.Flush()
+
+	rows, err := QueryStats(dbPath, "combo", nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
+	}
+	row := rows[0]
+	cost, _ := row["cost_usd"].(float64)
+	if math.Abs(cost-0.003) > 1e-12 {
+		t.Fatalf("cost = %v, want 0.003", cost)
+	}
+	if row["priced_count"] != float64(2) {
+		t.Fatalf("priced_count = %v, want 2", row["priced_count"])
 	}
 }
