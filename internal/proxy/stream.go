@@ -350,8 +350,11 @@ func (s *Service) checkSSEError(data []byte, providerName, model string, statusC
 		}
 	}
 
-	// Pass 2: JSONPath/body-based rules — require a parseable "data:" line.
+	// Pass 2: JSONPath/body-based rules. Accept SSE "data:" lines and, when
+	// the upstream returns a bare JSON or plain-text error body on a streaming
+	// request (common for gateway-level 429/5xx responses), the frame itself.
 	text := string(data)
+	var payloads [][]byte
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "data:") {
@@ -361,15 +364,32 @@ func (s *Service) checkSSEError(data []byte, providerName, model string, statusC
 		if jsonStr == "[DONE]" {
 			continue
 		}
-		var parsed any
-		if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
-			continue
+		payloads = append(payloads, []byte(jsonStr))
+	}
+	if len(payloads) == 0 {
+		t := strings.TrimSpace(text)
+		// Only fall back to the frame itself when there is no SSE framing at
+		// all (a bare JSON or plain-text error body). Frames made only of
+		// event:/data: lines are SSE metadata, not a matchable body.
+		if t != "" && !strings.HasPrefix(t, "data:") && !strings.HasPrefix(t, "event:") {
+			payloads = append(payloads, []byte(t))
 		}
+	}
+	for _, raw := range payloads {
+		var parsed any
+		jsonOK := json.Unmarshal(raw, &parsed) == nil
 		for _, cr := range s.providerRules[providerName] {
 			if len(cr.rule.Models) > 0 && !containsString(cr.rule.Models, model) {
 				continue
 			}
 			if cr.rule.JSONPath == "" || cr.expr.expr == nil {
+				continue
+			}
+			if !jsonOK {
+				// Plain-text error body: match the raw text.
+				if valueMatches(string(raw), cr.rule) {
+					return cr.rule
+				}
 				continue
 			}
 			for _, v := range cr.expr.find(parsed) {

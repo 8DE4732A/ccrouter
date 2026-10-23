@@ -37,8 +37,12 @@ func (x jsonPathExpr) find(data any) []any {
 // statusCode is the upstream HTTP status code (used for http_status_codes rules).
 func (s *Service) matchRotationRules(body []byte, providerName, model string, statusCode int) *config.HealthCheckRule {
 	var data any
-	if err := json.Unmarshal(body, &data); err != nil {
-		data = nil
+	jsonOK := json.Unmarshal(body, &data) == nil
+	// Only materialize the raw text when JSON parsing failed; successful
+	// responses are the hot path and can be large.
+	var text string
+	if !jsonOK {
+		text = string(body)
 	}
 	for _, cr := range s.providerRules[providerName] {
 		if len(cr.rule.Models) > 0 && !containsString(cr.rule.Models, model) {
@@ -52,8 +56,18 @@ func (s *Service) matchRotationRules(body []byte, providerName, model string, st
 				}
 			}
 		}
-		// Skip JSONPath body check if no JSONPath or no body data.
-		if cr.rule.JSONPath == "" || cr.expr.expr == nil || data == nil {
+		if cr.rule.JSONPath == "" || cr.expr.expr == nil {
+			continue
+		}
+		if !jsonOK {
+			// Non-JSON error body (some gateways return plain text): match the
+			// raw text so body rules still fire. Empty bodies never match.
+			if text == "" {
+				continue
+			}
+			if valueMatches(text, cr.rule) {
+				return cr.rule
+			}
 			continue
 		}
 		for _, v := range cr.expr.find(data) {
