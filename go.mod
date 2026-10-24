@@ -3,6 +3,7 @@ module ccrouter
 go 1.26.0
 
 require (
+	github.com/andybalholm/brotli v1.2.7
 	github.com/expr-lang/expr v1.17.8
 	github.com/gin-gonic/gin v1.12.0
 	github.com/klauspost/compress v1.19.2

@@ -19,6 +19,7 @@
 - **多用户隔离认证** — 下游聊天机器人通过 HTTP Header (`X-User-Id`) 标识用户，支持共享凭据及用户独立 OAuth 2.1 PKCE 授权，未授权返回标准 JSON-RPC `-32001`
 - **Payload 脚本** — 转发前执行脚本改写请求 body / header（基于 [expr-lang/expr](https://github.com/expr-lang/expr)，天然沙箱）
 - **Streaming** — 正确处理 SSE 流式响应，含 token usage 嗅探和首帧错误检测
+- **请求体压缩** — 客户端可用 `Content-Encoding: gzip` / `deflate` / `br` / `zstd` 提交请求，网关自动解压后转发
 - **管理页面** — 内置 Web UI，支持单用户密码认证、实时统计、请求明细、MCP 状态与调试、热重载配置（`/admin/`）
 - **单二进制** — 前端静态资源通过 `go:embed` 内嵌，部署只需一个可执行文件
 

@@ -40,6 +40,7 @@ func Router(state *gateway.State) *gin.Engine {
 
 	// ---- Proxy endpoints ----
 	proxyGroup := r.Group("/", authMW)
+	proxyGroup.Use(decompressRequestBody())
 	{
 		proxyGroup.POST("/v1/chat/completions", func(c *gin.Context) {
 			state.Service().Handle(c.Writer, c.Request, "openai", false)
@@ -97,6 +98,7 @@ func Router(state *gateway.State) *gin.Engine {
 
 	// ---- MCP Gateway endpoints ----
 	mcpGroup := r.Group("/mcp", authMW)
+	mcpGroup.Use(decompressRequestBody())
 	{
 		mcpGroup.POST("/:combo", func(c *gin.Context) {
 			if state.MCP() != nil {
@@ -145,6 +147,7 @@ func Router(state *gateway.State) *gin.Engine {
 
 		// Protected admin endpoints
 		protected := admin.Group("", adminAuth(state))
+		protected.Use(decompressRequestBody())
 		{
 			protected.GET("/config", getConfig)
 			protected.PUT("/config", putConfig)
@@ -242,9 +245,7 @@ func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 			}
 		}
 
-		isGemini := strings.HasPrefix(c.Request.URL.Path, "/v1beta/models") ||
-			strings.HasPrefix(c.Request.URL.Path, "/models") ||
-			xGoogAPIKey != "" || queryKey != ""
+		isGemini := isGeminiRequest(c)
 
 		abortAuthError := func(msg string) {
 			if isGemini {
@@ -284,6 +285,16 @@ func apiKeyAuth(state *gateway.State) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// isGeminiRequest reports whether the caller expects the Gemini API error
+// envelope, based on the route or the Gemini-style credential headers.
+func isGeminiRequest(c *gin.Context) bool {
+	path := c.Request.URL.Path
+	return strings.HasPrefix(path, "/v1beta/models") ||
+		strings.HasPrefix(path, "/models") ||
+		c.GetHeader("x-goog-api-key") != "" ||
+		c.Query("key") != ""
 }
 
 func hasPrefix(s, prefix string) bool {
