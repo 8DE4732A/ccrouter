@@ -92,6 +92,10 @@ export type ProviderConfig = {
   keys: KeyConfig[]
   health_check_rules: HealthCheckRule[]
   proxy?: ProxyConfig
+  /** Forward the client's own upstream credentials; no local keys are used. */
+  relay?: boolean
+  /** Optional outbound request-body compression (JSON only). */
+  request_compression?: 'off' | 'gzip' | 'deflate' | 'br' | 'zstd'
 }
 
 export type ModelCost = {
@@ -339,6 +343,8 @@ export type InfoProvider = {
   api_formats: string[]
   key_count: number
   strategy: string
+  relay?: boolean
+  request_compression?: string
 }
 export type AdminInfo = {
   version: string

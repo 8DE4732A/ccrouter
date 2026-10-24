@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -193,6 +194,10 @@ func buildService(cfg *config.AppConfig, prevKMs map[string]*keys.Manager,
 			km.MergeStats(prev)
 		}
 		kms[p.Name] = km
+		if p.Relay && len(cfg.General.APIKeys) > 0 {
+			log.Printf("warning: relay provider %q forwards the client's Authorization header, but general.api_keys is configured; "+
+				"the same header cannot also authenticate to ccrouter", p.Name)
+		}
 	}
 	return proxyPkg.New(cfg, kms, combos.NewRouter(cfg.Combos), providerClients, rec, rl)
 }

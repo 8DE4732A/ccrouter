@@ -67,6 +67,21 @@ providers:
         cooldown_seconds: 60
         models: []
 
+  # -----------------------------------------------------------------------
+  # Relay 透传（BYOK）：不配置本地 key，原样转发客户端带的上游凭据。
+  # 适合每个用户自己持有上游密钥的场景；请勿与 general.api_keys 同时启用，
+  # 否则同一个 Authorization 头会被 ccrouter 鉴权先行消费。
+  # 注意：relay provider 每个 combo member 只尝试一次，max_retries/key_strategy 不生效。
+  # -----------------------------------------------------------------------
+  # - name: byok-openai
+  #   relay: true
+  #   api:
+  #     - api_format: openai
+  #       base_url: "https://api.openai.com/v1"
+  #   request_compression: gzip        # 可选：压缩转发的 JSON 请求体（off|gzip|deflate|br|zstd）
+  #   keys: []                         # relay=true 时必须为空
+  #   health_check_rules: []
+
 combos:
   # =======================================================================
   # 默认分组（owned_by: "default" 或 default: true）

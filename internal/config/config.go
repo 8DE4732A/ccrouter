@@ -98,6 +98,26 @@ var validMatchTypes = map[string]bool{
 	"regex":    true,
 }
 
+// validRequestCompressions are the accepted outbound request-body encodings.
+// An empty value disables compression; "off" is normalized to "" first.
+var validRequestCompressions = map[string]bool{
+	"":        true,
+	"gzip":    true,
+	"deflate": true,
+	"br":      true,
+	"zstd":    true,
+}
+
+// normalizeRequestCompression lowercases the configured encoding and maps
+// "off" to "" so callers only need to check for an empty string.
+func normalizeRequestCompression(s string) string {
+	s = lower(s)
+	if s == "off" {
+		return ""
+	}
+	return s
+}
+
 // KeyConfig is a single API key entry.
 type KeyConfig struct {
 	Key string `json:"key" yaml:"key"`
@@ -168,6 +188,12 @@ type ProviderConfig struct {
 	KeyStrategy      string            `json:"key_strategy" yaml:"key_strategy"`
 	Keys             []KeyConfig       `json:"keys" yaml:"keys"`
 	HealthCheckRules []HealthCheckRule `json:"health_check_rules" yaml:"health_check_rules"`
+	// Relay disables local keys: the client's Authorization / x-api-key /
+	// x-goog-api-key (or Gemini ?key=) is forwarded to the upstream unchanged.
+	Relay bool `json:"relay,omitempty" yaml:"relay,omitempty"`
+	// RequestCompression optionally compresses forwarded JSON request bodies.
+	// One of "", gzip, deflate, br, zstd. Empty means disabled.
+	RequestCompression string `json:"request_compression,omitempty" yaml:"request_compression,omitempty"`
 	// Proxy overrides the global proxy for this provider.
 	// Set disabled: true to bypass the global proxy for this provider.
 	Proxy *ProxyConfig `json:"proxy,omitempty" yaml:"proxy,omitempty"`

@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -1357,5 +1358,176 @@ combos:
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+const relayProviderYAML = `
+providers:
+  - name: byok
+    relay: true
+    request_compression: gzip
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys: []
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: byok
+        model: m
+`
+
+func TestRelayProviderLoadsWithoutKeys(t *testing.T) {
+	cfg := loadFromText(t, relayProviderYAML)
+	p := cfg.Providers[0]
+	if !p.Relay {
+		t.Fatal("expected relay provider")
+	}
+	if len(p.Keys) != 0 {
+		t.Fatalf("expected no keys, got %d", len(p.Keys))
+	}
+	if p.RequestCompression != "gzip" {
+		t.Fatalf("compression = %q", p.RequestCompression)
+	}
+}
+
+func TestRelayProviderWithoutKeysField(t *testing.T) {
+	cfg := loadFromText(t, `
+providers:
+  - name: byok
+    relay: true
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: byok
+        model: m
+`)
+	if !cfg.Providers[0].Relay || len(cfg.Providers[0].Keys) != 0 {
+		t.Fatalf("unexpected provider: %+v", cfg.Providers[0])
+	}
+}
+
+func TestRejectsKeysOnRelayProvider(t *testing.T) {
+	_, err := loadFromTextErr(t, `
+providers:
+  - name: byok
+    relay: true
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: byok
+        model: m
+`)
+	if err == nil || !strings.Contains(err.Error(), "must not declare keys") {
+		t.Fatalf("expected relay key rejection, got %v", err)
+	}
+}
+
+func TestNonRelayProviderStillRequiresKeys(t *testing.T) {
+	_, err := loadFromTextErr(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys: []
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+`)
+	if err == nil || !strings.Contains(err.Error(), "at least one key") {
+		t.Fatalf("expected missing key error, got %v", err)
+	}
+}
+
+func TestRequestCompressionValidation(t *testing.T) {
+	for _, tc := range []struct {
+		value string
+		want  string
+	}{
+		{"gzip", "gzip"},
+		{"DEFLATE", "deflate"},
+		{"br", "br"},
+		{"zstd", "zstd"},
+		{"off", ""},
+		{"", ""},
+	} {
+		t.Run(tc.value, func(t *testing.T) {
+			cfg := loadFromText(t, `
+providers:
+  - name: sn
+    request_compression: "`+tc.value+`"
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+`)
+			if got := cfg.Providers[0].RequestCompression; got != tc.want {
+				t.Fatalf("compression = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	if _, err := loadFromTextErr(t, `
+providers:
+  - name: sn
+    request_compression: snappy
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: sn
+        model: m
+`); err == nil || !strings.Contains(err.Error(), "request_compression") {
+		t.Fatalf("expected compression validation error, got %v", err)
+	}
+}
+
+func TestRelayDumpRoundtrip(t *testing.T) {
+	cfg := loadFromText(t, relayProviderYAML)
+	dumped := Dump(cfg)
+	providers := dumped["providers"].([]any)
+	pm := providers[0].(map[string]any)
+	if pm["relay"] != true {
+		t.Fatalf("relay missing from dump: %+v", pm)
+	}
+	if pm["request_compression"] != "gzip" {
+		t.Fatalf("compression missing from dump: %+v", pm)
+	}
+	if len(pm["keys"].([]any)) != 0 {
+		t.Fatalf("expected empty keys, got %+v", pm["keys"])
+	}
+	rebuilt, err := Build(dumped)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if !rebuilt.Providers[0].Relay || rebuilt.Providers[0].RequestCompression != "gzip" {
+		t.Fatalf("roundtrip lost relay fields: %+v", rebuilt.Providers[0])
 	}
 }

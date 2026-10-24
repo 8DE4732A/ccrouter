@@ -20,7 +20,12 @@ func (s *Service) record(combo, provider, model, key, apiFormat, upstreamAPIForm
 	if usage == nil {
 		usage = map[string]any{}
 	}
-	keyPrefix := keyPrefixOf(key)
+	// Relay requests carry no local key; store NULL rather than an empty prefix.
+	var keyPrefix *string
+	if key != "" {
+		p := keyPrefixOf(key)
+		keyPrefix = &p
+	}
 	dur := int(time.Since(t0).Milliseconds())
 	successInt := 0
 	if success {
@@ -46,7 +51,7 @@ func (s *Service) record(combo, provider, model, key, apiFormat, upstreamAPIForm
 		Combo:            strPtr(combo),
 		Provider:         strPtr(provider),
 		Model:            strPtr(model),
-		KeyPrefix:        strPtr(keyPrefix),
+		KeyPrefix:        keyPrefix,
 		APIFormat:        strPtr(apiFormat),
 		IsStream:         streamInt,
 		StatusCode:       statusCode,

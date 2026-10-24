@@ -17,7 +17,7 @@ import (
 
 func goRuntime() string { return runtime.Version() }
 
-var version = "0.10.0"
+var version = "0.11.0"
 
 func stateOf(c *gin.Context) *gateway.State {
 	v, _ := c.Get("state")
@@ -361,12 +361,17 @@ func adminInfo(c *gin.Context) {
 		for _, ep := range p.APIs {
 			formats = append(formats, ep.APIFormat)
 		}
-		providers = append(providers, map[string]any{
+		pm := map[string]any{
 			"name":        p.Name,
 			"api_formats": formats,
 			"key_count":   len(p.Keys),
 			"strategy":    p.KeyStrategy,
-		})
+			"relay":       p.Relay,
+		}
+		if p.RequestCompression != "" {
+			pm["request_compression"] = p.RequestCompression
+		}
+		providers = append(providers, pm)
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"version":   version,

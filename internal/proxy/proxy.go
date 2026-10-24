@@ -174,6 +174,8 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 	}
 
 	attemptedMembers := map[[2]string]bool{}
+	// Relay providers forward the client's Gemini query credential verbatim.
+	clientGeminiKey := r.URL.Query().Get("key")
 
 	for {
 		providerName, model, upstreamFmt := s.Router.NextMemberWithFmt(requestedModel, attemptedMembers)
@@ -184,6 +186,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 
 		km := s.KeyManagers[providerName]
 		providerCfg := s.providers[providerName]
+		relay := providerCfg.Relay
 
 		// Resolve the upstream API format to use for this member:
 		//   1. If provider natively supports the client format → use it directly (no translation).
@@ -243,15 +246,27 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 
 		attemptedKeys := map[string]bool{}
 		maxAttempts := providerCfg.MaxRetries + 1
+		if relay {
+			// A relay provider has no key pool: one attempt per combo member.
+			maxAttempts = 1
+		}
 
 		handled := false
 		for i := 0; i < maxAttempts; i++ {
-			key := km.Get(model, attemptedKeys)
-			if key == "" {
-				break
+			key := ""
+			if !relay {
+				key = km.Get(model, attemptedKeys)
+				if key == "" {
+					break
+				}
+				attemptedKeys[key] = true
 			}
-			attemptedKeys[key] = true
-			headers := buildHeaders(r, key, upstreamFmt)
+			var headers http.Header
+			if relay {
+				headers = buildRelayHeaders(r)
+			} else {
+				headers = buildHeaders(r, key, upstreamFmt)
+			}
 			if upstreamContentType != "" {
 				headers.Set("Content-Type", upstreamContentType)
 			}
@@ -272,30 +287,49 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 					"headers": headerToMap(headers),
 					"body":    sanitizeBodyForLog(actualBody, headers.Get("Content-Type")),
 				}
+				if compressionApplies(providerCfg, headers.Get("Content-Type"), len(actualBody)) {
+					upstreamCtx["request_compression"] = providerCfg.RequestCompression
+				}
+			}
+
+			// Gemini credentials are a query parameter upstream; relay providers
+			// use the client's own key, keyed providers the selected pool key.
+			geminiKey := key
+			if relay {
+				geminiKey = clientGeminiKey
 			}
 
 			done, matched := s.attempt(w, r, t0, km, targetURL, headers, actualBody,
 				providerName, model, isStream, requestedModel, key, apiFormat, upstreamFmt, matchedPayload,
-				clientBody, clientCtx, upstreamCtx)
+				clientBody, geminiKey, clientCtx, upstreamCtx)
 			if done {
 				handled = true
 				break
 			}
 			if matched != nil {
+				s.record(requestedModel, providerName, model, key, apiFormat, upstreamFmt,
+					isStream, nil, false, matched.Description,
+					map[string]any{}, t0, nil, &matchedPayload)
+				if relay {
+					// No key to cool down or rotate within this provider: fall through
+					// to the next combo member.
+					log.Printf("Relay rule matched: provider=%s model=%s rule=%q, trying next member",
+						providerName, model, matched.Description)
+					break
+				}
 				// Health rule triggered: cool down this key and record the rotation event.
 				km.RecordError(key, model, matched.CooldownSeconds)
 				log.Printf("Rotation: provider=%s key=%.8s model=%s rule=%q cooldown=%ds",
 					providerName, key, model, matched.Description, matched.CooldownSeconds)
-				s.record(requestedModel, providerName, model, key, apiFormat, upstreamFmt,
-					isStream, nil, false, matched.Description,
-					map[string]any{}, t0, nil, &matchedPayload)
 				continue
 			}
 		}
 		if handled {
 			return
 		}
-		log.Printf("All keys exhausted: provider=%s model=%s, trying next member", providerName, model)
+		if !relay {
+			log.Printf("All keys exhausted: provider=%s model=%s, trying next member", providerName, model)
+		}
 		attemptedMembers[[2]string{providerName, model}] = true
 	}
 }
@@ -310,19 +344,19 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 func (s *Service) attempt(w http.ResponseWriter, r *http.Request, t0 time.Time, km *keys.Manager, targetURL string,
 	headers http.Header, body []byte, providerName, model string, isStream bool,
 	combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload string,
-	originalClientBody []byte,
+	originalClientBody []byte, geminiKey string,
 	clientCtx, upstreamCtx map[string]any) (bool, *config.HealthCheckRule) {
 
 	if isStream {
-		return s.attemptStreaming(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
+		return s.attemptStreaming(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, geminiKey, clientCtx, upstreamCtx)
 	}
 	// openai-responses upstream always returns SSE regardless of the stream flag.
 	// For a non-streaming client request, consume the SSE internally, extract the
 	// final response.completed event, then translate and return as a single JSON body.
 	if upstreamAPIFormat == "openai-responses" {
-		return s.attemptNonStreamingViaSSE(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
+		return s.attemptNonStreamingViaSSE(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, geminiKey, clientCtx, upstreamCtx)
 	}
-	return s.attemptNonStreaming(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, clientCtx, upstreamCtx)
+	return s.attemptNonStreaming(w, r, t0, km, targetURL, headers, body, providerName, model, combo, key, clientAPIFormat, upstreamAPIFormat, matchedPayload, originalClientBody, geminiKey, clientCtx, upstreamCtx)
 }
 
 // attemptNonStreamingViaSSE handles upstreams that always return SSE (e.g. openai-responses)
@@ -332,14 +366,15 @@ func (s *Service) attempt(w http.ResponseWriter, r *http.Request, t0 time.Time, 
 func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Request, t0 time.Time, km *keys.Manager,
 	targetURL string, headers http.Header, body []byte, providerName, model, combo, key,
 	clientAPIFormat, upstreamAPIFormat, matchedPayload string,
-	originalClientBody []byte,
+	originalClientBody []byte, geminiKey string,
 	clientCtx, upstreamCtx map[string]any) (bool, *config.HealthCheckRule) {
 
 	upstreamURL := targetURL
 	if upstreamAPIFormat == "gemini" {
-		upstreamURL = appendGeminiKey(targetURL, key)
+		upstreamURL = appendGeminiKey(targetURL, geminiKey)
 	}
-	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
+	reqBody := s.compressUpstreamBody(providerName, body, headers)
+	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
 		jsonError(w, 500, fmt.Sprintf("failed to build upstream request: %v", err), "proxy_error")
 		return true, nil
@@ -396,7 +431,7 @@ func (s *Service) attemptNonStreamingViaSSE(w http.ResponseWriter, r *http.Reque
 	completedJSON = wrapResponseCompletedIfNeeded(completedJSON)
 
 	usage := extractUsage(completedJSON, upstreamAPIFormat)
-	km.RecordSuccess(key, model)
+	recordKeySuccess(km, key, model)
 
 	outBody := completedJSON
 	if upstreamAPIFormat != clientAPIFormat {
@@ -495,15 +530,16 @@ func wrapResponseCompletedIfNeeded(body []byte) []byte {
 func (s *Service) attemptNonStreaming(w http.ResponseWriter, r *http.Request, t0 time.Time, km *keys.Manager,
 	targetURL string, headers http.Header, body []byte, providerName, model, combo, key,
 	clientAPIFormat, upstreamAPIFormat, matchedPayload string,
-	originalClientBody []byte,
+	originalClientBody []byte, geminiKey string,
 	clientCtx, upstreamCtx map[string]any) (bool, *config.HealthCheckRule) {
 
 	// Gemini authenticates via ?key= query param instead of Authorization header.
 	upstreamURL := targetURL
 	if upstreamAPIFormat == "gemini" {
-		upstreamURL = appendGeminiKey(targetURL, key)
+		upstreamURL = appendGeminiKey(targetURL, geminiKey)
 	}
-	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
+	reqBody := s.compressUpstreamBody(providerName, body, headers)
+	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
 		jsonError(w, 500, fmt.Sprintf("failed to build upstream request: %v", err), "proxy_error")
 		return true, nil
@@ -532,7 +568,7 @@ func (s *Service) attemptNonStreaming(w http.ResponseWriter, r *http.Request, t0
 	var usage map[string]any
 	if httpOK {
 		usage = extractUsage(respBody, upstreamAPIFormat)
-		km.RecordSuccess(key, model)
+		recordKeySuccess(km, key, model)
 	} else {
 		usage = map[string]any{}
 	}
@@ -840,6 +876,53 @@ func isStreamingRequest(r *http.Request, body []byte) bool {
 	return false
 }
 
+// forwardedHeaders copies client headers for the upstream.
+//
+// Hop-by-hop headers and Accept-Encoding are always dropped: letting Go's
+// http.Client negotiate compression means it also transparently decompresses
+// upstream responses, which would not happen if we forwarded the client's
+// Accept-Encoding. Content-Encoding is dropped because the inbound middleware
+// has already decoded the body.
+//
+// When keepAuth is false the three upstream auth headers are also dropped;
+// buildHeaders re-injects the selected key below. Relay providers pass true to
+// forward the client's own credentials verbatim.
+func forwardedHeaders(r *http.Request, keepAuth bool) http.Header {
+	h := http.Header{}
+	for k, vs := range r.Header {
+		kl := strings.ToLower(k)
+		if hopByHopHeaders[kl] || kl == "accept-encoding" {
+			continue
+		}
+		if !keepAuth && (kl == "x-api-key" || kl == "authorization" || kl == "x-goog-api-key") {
+			continue
+		}
+		for _, v := range vs {
+			h.Add(k, v)
+		}
+	}
+	h.Del("Content-Encoding")
+	h.Del("Host")
+	h.Del("Content-Length")
+	return h
+}
+
+// buildRelayHeaders forwards the client's credentials unchanged. It never
+// synthesizes an Authorization header, so a credential-less client stays
+// credential-less (some upstreams accept anonymous requests).
+func buildRelayHeaders(r *http.Request) http.Header {
+	return forwardedHeaders(r, true)
+}
+
+// recordKeySuccess updates key statistics, tolerating relay providers (empty
+// key) and services built without a manager for the provider.
+func recordKeySuccess(km *keys.Manager, key, model string) {
+	if km == nil || key == "" {
+		return
+	}
+	km.RecordSuccess(key, model)
+}
+
 func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http.Header {
 	// Remember which auth scheme(s) the incoming client request used, before
 	// we strip them below. We mirror whatever the client sent — swapping in
@@ -852,29 +935,10 @@ func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http
 	hadXAPIKey := r.Header.Get("X-Api-Key") != ""
 	hadAuthorization := r.Header.Get("Authorization") != ""
 
-	h := http.Header{}
-	for k, vs := range r.Header {
-		kl := strings.ToLower(k)
-		if hopByHopHeaders[kl] {
-			continue
-		}
-		// Remove Accept-Encoding: let Go's http.Client handle compression negotiation
-		// and transparent decompression. If we forward the client's Accept-Encoding,
-		// the upstream may return gzip/br and Go won't auto-decompress it.
-		if kl == "accept-encoding" {
-			continue
-		}
-		// Remove x-api-key / Authorization / x-goog-api-key: we set the correct upstream auth below.
-		if kl == "x-api-key" || kl == "authorization" || kl == "x-goog-api-key" {
-			continue
-		}
-		for _, v := range vs {
-			h.Add(k, v)
-		}
-	}
+	h := forwardedHeaders(r, false)
 
 	if upstreamAPIFormat == "gemini" {
-		// Auth is added as ?key= query param in buildGeminiURL, not as a header.
+		// Auth is added as ?key= query param in appendGeminiKey, not as a header.
 	} else if hadXAPIKey || hadAuthorization {
 		// Mirror the client's chosen scheme(s), substituting our real key.
 		if hadXAPIKey {
@@ -894,8 +958,6 @@ func buildHeaders(r *http.Request, apiKey string, upstreamAPIFormat string) http
 		}
 	}
 
-	h.Del("Host")
-	h.Del("Content-Length")
 	return h
 }
 

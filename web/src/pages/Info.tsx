@@ -153,10 +153,12 @@ export default function InfoPage() {
                 {p.api_formats.map(f => (
                   <span key={f} className={`tag ${(FMT_COLOR as Record<string, string>)[f] ?? ''}`} style={{ fontSize: 10 }}>{f}</span>
                 ))}
+                {p.relay && <span className="tag" style={{ fontSize: 10 }}>relay</span>}
+                {p.request_compression && <span className="tag" style={{ fontSize: 10 }}>{p.request_compression}</span>}
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-3)', display: 'flex', gap: 16 }}>
-                <span>{p.key_count} 个密钥</span>
-                <span>{p.strategy}</span>
+                <span>{p.relay ? 'Relay 透传（无密钥）' : `${p.key_count} 个密钥`}</span>
+                {!p.relay && <span>{p.strategy}</span>}
               </div>
             </div>
           ))}

@@ -19,7 +19,8 @@
 - **多用户隔离认证** — 下游聊天机器人通过 HTTP Header (`X-User-Id`) 标识用户，支持共享凭据及用户独立 OAuth 2.1 PKCE 授权，未授权返回标准 JSON-RPC `-32001`
 - **Payload 脚本** — 转发前执行脚本改写请求 body / header（基于 [expr-lang/expr](https://github.com/expr-lang/expr)，天然沙箱）
 - **Streaming** — 正确处理 SSE 流式响应，含 token usage 嗅探和首帧错误检测
-- **请求体压缩** — 客户端可用 `Content-Encoding: gzip` / `deflate` / `br` / `zstd` 提交请求，网关自动解压后转发
+- **请求体压缩** — 客户端可用 `Content-Encoding: gzip` / `deflate` / `br` / `zstd` 提交请求，网关自动解压后转发；provider 也可选用 gzip/deflate/br/zstd 压缩转发的 JSON 请求体
+- **Relay / BYOK 透传** — provider 可配置为 `relay: true`，不保存上游密钥，原样转发客户端自己的凭据，适合多用户各持密钥的场景
 - **管理页面** — 内置 Web UI，支持单用户密码认证、实时统计、请求明细、MCP 状态与调试、热重载配置（`/admin/`）
 - **单二进制** — 前端静态资源通过 `go:embed` 内嵌，部署只需一个可执行文件
 
@@ -142,6 +143,7 @@ providers:
         base_url: "https://token.sensenova.cn/v1"
     max_retries: 3                # 单 Provider 内最多尝试次数（含首次）；默认 3
     key_strategy: "fill-first"    # fill-first（默认）| round-robin
+    request_compression: gzip     # 可选：压缩转发给上游的 JSON 请求体（off|gzip|deflate|br|zstd）
     keys:
       - key: "sk-xxxx-1"
       - key: "sk-xxxx-2"
@@ -154,6 +156,26 @@ providers:
         cooldown_seconds: 18000            # 冷却秒数；默认 60
         models: ["deepseek-v4-flash"]      # 空列表 = 适用所有模型
 ```
+
+#### Relay 透传（BYOK，无需本地密钥）
+
+当每个客户端用户自己持有上游密钥时，把 provider 标记为 `relay: true`。ccrouter 不保存、不替换凭据，原样转发客户端携带的 `Authorization`、`x-api-key`、`x-goog-api-key`，Gemini 请求还会转发 `?key=` 查询参数。
+
+```yaml
+providers:
+  - name: byok-openai
+    relay: true
+    api:
+      - api_format: openai
+        base_url: "https://api.openai.com/v1"
+    request_compression: gzip   # 可选：压缩转发给上游的 JSON 请求体
+    keys: []                    # relay=true 时必须为空
+```
+
+- relay provider 每个 combo member 只尝试一次；`max_retries` / `key_strategy` 不生效，健康规则命中后直接切换到下一个 member。
+- 客户端完全不带凭据时也会照常转发（不本地返回 401），匿名上游可正常工作。
+- **不要与 `general.api_keys` 同时启用**：同一个 `Authorization` 头会被 ccrouter 鉴权先行消费，relay 客户端无法再携带上游密钥。relay 部署建议保持 `api_keys` 为空。
+- Gemini 客户端若同时发送 `?key=` 和 `x-goog-api-key`，两者都会转发，请只使用一种。
 
 ### `combos`
 

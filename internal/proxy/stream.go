@@ -22,14 +22,15 @@ import (
 func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 time.Time, km *keys.Manager,
 	targetURL string, headers http.Header, body []byte, providerName, model, combo, key,
 	clientAPIFormat, upstreamAPIFormat, matchedPayload string,
-	originalClientBody []byte,
+	originalClientBody []byte, geminiKey string,
 	clientCtx, upstreamCtx map[string]any) (bool, *config.HealthCheckRule) {
 
 	upstreamURL := targetURL
 	if upstreamAPIFormat == "gemini" {
-		upstreamURL = appendGeminiKey(targetURL, key)
+		upstreamURL = appendGeminiKey(targetURL, geminiKey)
 	}
-	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(body))
+	reqBody := s.compressUpstreamBody(providerName, body, headers)
+	req, err := http.NewRequestWithContext(r.Context(), "POST", upstreamURL, bytes.NewReader(reqBody))
 	if err != nil {
 		jsonError(w, 500, "failed to build upstream request", "proxy_error")
 		return true, nil
@@ -77,7 +78,7 @@ func (s *Service) attemptStreaming(w http.ResponseWriter, r *http.Request, t0 ti
 		}
 
 		if httpOK {
-			km.RecordSuccess(key, model)
+			recordKeySuccess(km, key, model)
 			usage := extractUsage(respBody, upstreamAPIFormat)
 			s.record(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, true, &statusCode, true, "", usage, t0, nil, &matchedPayload)
 		} else {
@@ -313,7 +314,7 @@ func (s *Service) finishStream(combo, providerName, model, key, clientAPIFormat,
 	statusCode int, success bool, usage map[string]any, t0 time.Time, matchedPayload string,
 	clientCtx, upstreamCtx map[string]any, accumulated []byte) {
 	if success {
-		s.KeyManagers[providerName].RecordSuccess(key, model)
+		recordKeySuccess(s.KeyManagers[providerName], key, model)
 	}
 	s.record(combo, providerName, model, key, clientAPIFormat, upstreamAPIFormat, true, &statusCode, success, "", usage, t0, nil, &matchedPayload)
 	if clientCtx != nil && upstreamCtx != nil {

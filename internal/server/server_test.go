@@ -1672,3 +1672,63 @@ func TestModelsDevAdminAPI(t *testing.T) {
 		t.Fatalf("status endpoint = %d", rec.Code)
 	}
 }
+
+func TestAdminInfoExposesRelayProvider(t *testing.T) {
+	st, _ := newTestStateWithYAML(t, `
+providers:
+  - name: byok
+    relay: true
+    request_compression: gzip
+    api:
+      - api_format: openai
+        base_url: "http://127.0.0.1:1/v1"
+    keys: []
+combos:
+  - name: c
+    api_format: openai
+    members:
+      - provider: byok
+        model: m
+`)
+	r := Router(st)
+
+	rec := doGET(t, r, "/admin/api/info")
+	if rec.Code != 200 {
+		t.Fatalf("info: status %d body %s", rec.Code, rec.Body.String())
+	}
+	var info struct {
+		Providers []struct {
+			Name               string `json:"name"`
+			Relay              bool   `json:"relay"`
+			RequestCompression string `json:"request_compression"`
+			KeyCount           int    `json:"key_count"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &info); err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Providers) != 1 {
+		t.Fatalf("expected 1 provider, got %d", len(info.Providers))
+	}
+	p := info.Providers[0]
+	if !p.Relay || p.RequestCompression != "gzip" || p.KeyCount != 0 {
+		t.Fatalf("unexpected provider info: %+v", p)
+	}
+
+	// Relay providers have no key pool and must not appear in key status.
+	rec = doGET(t, r, "/admin/api/stats/keys")
+	if rec.Code != 200 {
+		t.Fatalf("stats keys: status %d body %s", rec.Code, rec.Body.String())
+	}
+	var status struct {
+		Providers []struct {
+			Provider string `json:"provider"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Providers) != 0 {
+		t.Fatalf("relay provider leaked into key status: %+v", status.Providers)
+	}
+}

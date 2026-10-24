@@ -51,7 +51,14 @@ ProviderConfig:
   key_strategy:       [fill-first | round-robin, default=fill-first]
                                                  # fill-first：始终优先第一个可用 key
                                                  # round-robin：轮询分摊请求
-  keys:               <list[KeyConfig]>          # 至少一个
+  keys:               <list[KeyConfig]>          # relay=false 时至少一个；relay=true 时必须为空
+  relay:              [bool, default=false]      # true：不配置本地 key，原样透传客户端的
+                                                 # Authorization / x-api-key / x-goog-api-key（Gemini 可用 ?key=）
+                                                 # 注意：relay 与 general.api_keys 共用 Authorization 头，
+                                                 # relay 部署建议清空 general.api_keys
+  request_compression: [off | gzip | deflate | br | zstd, default=off]
+                                                 # 可选：压缩转发给上游的 JSON 请求体；
+                                                 # multipart 与非 JSON 请求体不压缩
   health_check_rules: [list[HealthCheckRule], default=[]]
 
 

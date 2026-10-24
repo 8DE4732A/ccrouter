@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"ccrouter/internal/config"
 	"ccrouter/internal/gateway"
 
 	"github.com/gin-gonic/gin"
@@ -90,9 +89,13 @@ func healthCheck(c *gin.Context) {
 func keysStatus(c *gin.Context, state *gateway.State) {
 	svc := state.Service()
 	providers := []map[string]any{}
-	names := providerNames(svc.Config.Providers)
-	for _, name := range names {
-		if km, ok := svc.KeyManagers[name]; ok {
+	for i := range svc.Config.Providers {
+		p := &svc.Config.Providers[i]
+		if p.Relay {
+			// Relay providers have no local key pool.
+			continue
+		}
+		if km, ok := svc.KeyManagers[p.Name]; ok {
 			providers = append(providers, km.Stats())
 		}
 	}
@@ -100,12 +103,4 @@ func keysStatus(c *gin.Context, state *gateway.State) {
 		"combos":    svc.Router.List(),
 		"providers": providers,
 	})
-}
-
-func providerNames(providers []config.ProviderConfig) []string {
-	out := make([]string, 0, len(providers))
-	for i := range providers {
-		out = append(out, providers[i].Name)
-	}
-	return out
 }

@@ -102,6 +102,12 @@ func Dump(cfg *AppConfig) map[string]any {
 			"keys":               keys,
 			"health_check_rules": rules,
 		}
+		if p.Relay {
+			pm["relay"] = true
+		}
+		if p.RequestCompression != "" {
+			pm["request_compression"] = p.RequestCompression
+		}
 		// Per-provider proxy override.
 		if p.Proxy != nil {
 			pp := map[string]any{}

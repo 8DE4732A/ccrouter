@@ -19,6 +19,7 @@ const EMPTY_RULE = (): HealthCheckRule => ({
 const EMPTY_PROVIDER = (): ProviderConfig => ({
   name: '', api: [EMPTY_ENDPOINT()], max_retries: 3,
   key_strategy: 'fill-first', keys: [{ key: '' }], health_check_rules: [],
+  relay: false, request_compression: 'off',
 })
 const EMPTY_GENERAL = (): GeneralConfig => ({ api_keys: [], proxy: undefined, request_timeout_seconds: undefined })
 const EMPTY_COMBO = (): ComboConfig => ({
@@ -136,9 +137,10 @@ function FieldRow({ label, hint, children }: { label: string; hint?: string; chi
 
 // ── Provider detail panel ────────────────────────────────────────
 function ProviderDetail({
-  p, onUpdate,
+  p, apiKeysConfigured, onUpdate,
 }: {
   p: ProviderConfig
+  apiKeysConfigured: boolean
   onUpdate: (patch: Partial<ProviderConfig>) => void
 }) {
   const [revealedKeys, setRevealedKeys] = useState<Set<number>>(new Set())
@@ -158,19 +160,72 @@ function ProviderDetail({
         <FieldRow label="名称">
           <input value={p.name} placeholder="sensenova" onChange={e => onUpdate({ name: e.target.value })} />
         </FieldRow>
-        <FieldRow label="Max Retries">
-          <input type="number" min={0} value={p.max_retries}
-            onChange={e => onUpdate({ max_retries: parseInt(e.target.value) || 0 })}
-            style={{ maxWidth: 80 }} />
+        <FieldRow label="凭据模式" hint={p.relay ? '透传客户端携带的上游凭据' : '使用本地配置的密钥池'}>
+          <div style={{ display: 'flex', gap: 6 }}>
+            {([
+              [false, '密钥池'] as const,
+              [true, 'Relay 透传'] as const,
+            ]).map(([isRelay, label]) => {
+              const active = !!p.relay === isRelay
+              return (
+                <label key={label} onClick={() => {
+                  if (isRelay) {
+                    onUpdate({ relay: true, keys: [] })
+                  } else {
+                    onUpdate({ relay: false, keys: p.keys.length > 0 ? p.keys : [{ key: '' }] })
+                  }
+                }} style={{
+                  display: 'flex', alignItems: 'center', gap: 5,
+                  padding: '5px 10px', borderRadius: 5, cursor: 'pointer',
+                  border: `1px solid ${active ? 'var(--accent)' : 'var(--border-md)'}`,
+                  background: active ? 'var(--accent-light)' : 'var(--bg-input)',
+                  fontSize: 12, fontWeight: active ? 600 : 400, userSelect: 'none',
+                }}>
+                  {label}
+                </label>
+              )
+            })}
+          </div>
         </FieldRow>
-        <FieldRow label="Key 策略">
-          <select value={p.key_strategy}
-            onChange={e => onUpdate({ key_strategy: e.target.value as ProviderConfig['key_strategy'] })}
+        {!p.relay && (<>
+          <FieldRow label="Max Retries">
+            <input type="number" min={0} value={p.max_retries}
+              onChange={e => onUpdate({ max_retries: parseInt(e.target.value) || 0 })}
+              style={{ maxWidth: 80 }} />
+          </FieldRow>
+          <FieldRow label="Key 策略">
+            <select value={p.key_strategy}
+              onChange={e => onUpdate({ key_strategy: e.target.value as ProviderConfig['key_strategy'] })}
+              style={{ maxWidth: 200 }}>
+              <option value="fill-first">fill-first — 优先使用第一个可用 key</option>
+              <option value="round-robin">round-robin — 轮询均摊</option>
+            </select>
+          </FieldRow>
+        </>)}
+        <FieldRow label="出站压缩" hint="仅压缩 JSON 请求体，multipart 与其它类型不压缩">
+          <select value={p.request_compression ?? 'off'}
+            onChange={e => onUpdate({ request_compression: e.target.value as ProviderConfig['request_compression'] })}
             style={{ maxWidth: 200 }}>
-            <option value="fill-first">fill-first — 优先使用第一个可用 key</option>
-            <option value="round-robin">round-robin — 轮询均摊</option>
+            <option value="off">关闭</option>
+            <option value="gzip">gzip</option>
+            <option value="deflate">deflate</option>
+            <option value="br">br</option>
+            <option value="zstd">zstd</option>
           </select>
         </FieldRow>
+        {p.relay && (
+          <div className="alert ok" style={{ marginTop: 10, fontSize: 12, display: 'block' }}>
+            客户端发来的 <code>Authorization</code> / <code>x-api-key</code> / <code>x-goog-api-key</code>
+            （Gemini 也可用 <code>?key=</code>）会原样转发给上游，ccrouter 不保存也不替换凭据。
+            每个 combo member 只尝试一次；健康规则命中后直接切换到下一个 member。
+            {apiKeysConfigured && (
+              <div style={{ color: 'var(--warn-fg)', marginTop: 6 }}>
+                注意：已配置 <code>general.api_keys</code>，同一 Authorization 头会先被 ccrouter 鉴权消费，
+                relay 客户端将无法同时携带上游密钥。使用 relay 时建议清空 api_keys。
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* API Endpoints */}
@@ -210,6 +265,7 @@ function ProviderDetail({
       </div>
 
       {/* Keys */}
+      {!p.relay && (
       <div>
         <SectionLabel>API Keys ({p.keys.length})</SectionLabel>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -257,10 +313,13 @@ function ProviderDetail({
           </button>
         </div>
       </div>
+      )}
 
       {/* Health check rules */}
       <div>
-        <SectionLabel>健康检测规则 — 匹配时触发 key 轮换+冷却</SectionLabel>
+        <SectionLabel>{p.relay
+          ? '健康检测规则 — 匹配时切换到下一个 combo member'
+          : '健康检测规则 — 匹配时触发 key 轮换+冷却'}</SectionLabel>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {p.health_check_rules.map((r, ri) => (
             <div key={ri} style={{
@@ -1268,6 +1327,13 @@ export default function ConfigEditor() {
         })),
         providers: cfg.providers.map(p => {
           const pp = { ...p }
+          // Relay providers carry no local keys.
+          if (pp.relay) {
+            pp.keys = []
+          }
+          if (!pp.request_compression || pp.request_compression === 'off') {
+            delete pp.request_compression
+          }
           // Clean up per-provider proxy
           if (!pp.proxy?.url && !pp.proxy?.disabled) {
             delete pp.proxy
@@ -1541,8 +1607,13 @@ export default function ConfigEditor() {
                         </span>
                       ))}
                       <span className="tag" style={{ fontSize: 10, padding: '1px 5px' }}>
-                        {p.keys.length}k
+                        {p.relay ? 'relay' : `${p.keys.length}k`}
                       </span>
+                      {p.request_compression && p.request_compression !== 'off' && (
+                        <span className="tag" style={{ fontSize: 10, padding: '1px 5px' }}>
+                          {p.request_compression}
+                        </span>
+                      )}
                     </div>
                   </div>
                 )
@@ -1748,6 +1819,7 @@ export default function ConfigEditor() {
                 </div>
                 <ProviderDetail
                   p={curProvider}
+                  apiKeysConfigured={(cfg.general?.api_keys?.length ?? 0) > 0}
                   onUpdate={patch => updateProvider(selProvider, patch)}
                 />
               </div>

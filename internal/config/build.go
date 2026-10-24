@@ -495,21 +495,35 @@ func buildProvider(p map[string]any, idx int) (*ProviderConfig, error) {
 		return nil, errf("providers[%d].key_strategy must be one of: fill-first, round-robin", idx)
 	}
 
+	pc.Relay = toBool(p["relay"])
+
+	compression := normalizeRequestCompression(strVal(p["request_compression"]))
+	if !validRequestCompressions[compression] {
+		return nil, errf("providers[%d].request_compression must be one of: off, gzip, deflate, br, zstd", idx)
+	}
+	pc.RequestCompression = compression
+
 	// keys
 	keysRaw, ok := p["keys"].([]any)
-	if !ok || len(keysRaw) == 0 {
-		return nil, errf("providers[%d] must contain at least one key in 'keys'", idx)
-	}
-	for j, kv := range keysRaw {
-		km, err := asMap(kv, fmt.Sprintf("providers[%d].keys[%d]", idx, j))
-		if err != nil {
-			return nil, err
+	if pc.Relay {
+		if ok && len(keysRaw) > 0 {
+			return nil, errf("providers[%d]: relay providers must not declare keys", idx)
 		}
-		key, ok := km["key"].(string)
-		if !ok || strings.TrimSpace(key) == "" {
-			return nil, errf("providers[%d].keys[%d].key must not be empty", idx, j)
+	} else {
+		if !ok || len(keysRaw) == 0 {
+			return nil, errf("providers[%d] must contain at least one key in 'keys'", idx)
 		}
-		pc.Keys = append(pc.Keys, KeyConfig{Key: key})
+		for j, kv := range keysRaw {
+			km, err := asMap(kv, fmt.Sprintf("providers[%d].keys[%d]", idx, j))
+			if err != nil {
+				return nil, err
+			}
+			key, ok := km["key"].(string)
+			if !ok || strings.TrimSpace(key) == "" {
+				return nil, errf("providers[%d].keys[%d].key must not be empty", idx, j)
+			}
+			pc.Keys = append(pc.Keys, KeyConfig{Key: key})
+		}
 	}
 
 	// health_check_rules
