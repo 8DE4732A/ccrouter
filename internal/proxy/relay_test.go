@@ -104,6 +104,7 @@ func TestRelayForwardsClientCredentials(t *testing.T) {
 	}
 
 	// Relay rows must not persist the client's credential.
+	rec.Flush()
 	res, err := db.QueryList(dbPath, 10, 0, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)
