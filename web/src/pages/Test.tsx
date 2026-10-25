@@ -238,6 +238,7 @@ function parseNonStreamBlocks(fmt: ApiFormat, obj: unknown, rawText: string): Ou
 export default function TestPage() {
   const [cfg, setCfg] = useState<AppConfig | null>(null)
   const [comboName, setComboName] = useState('')
+  const [relayModel, setRelayModel] = useState('')
   const [fmt, setFmt] = useState<ApiFormat>('openai')
   const [prompt, setPrompt] = useState('')
   const [stream, setStream] = useState(true)
@@ -336,6 +337,11 @@ export default function TestPage() {
 
   // Available formats for selected combo
   const selectedCombo = flatCombos.find(c => getFullID(c) === comboName || c.name === comboName)
+  // Relay combos forward the model id after "<combo>/".
+  const isRelayCombo = Boolean(selectedCombo?.relay)
+  const requestModel = isRelayCombo && relayModel.trim()
+    ? `${comboName}/${relayModel.trim()}`
+    : comboName
   const availableFormats: ApiFormat[] = useMemo(() => {
     if (!selectedCombo) return ['openai']
     const raw = normalizeFormats(selectedCombo.api_format ?? 'openai')
@@ -361,7 +367,7 @@ export default function TestPage() {
   }
 
   const send = async () => {
-    if (!prompt.trim() || !comboName) return
+    if (!prompt.trim() || !comboName || (isRelayCombo && !relayModel.trim())) return
     setBlocks([])
     setImageUrls([])
     setErrMsg('')
@@ -391,7 +397,7 @@ export default function TestPage() {
           return
         }
         const fd = new FormData()
-        fd.append('model', comboName)
+        fd.append('model', requestModel)
         fd.append('prompt', prompt.trim())
         fd.append('image', editImageFile)
         if (editMaskFile) {
@@ -407,12 +413,12 @@ export default function TestPage() {
           signal: ctrl.signal,
         })
       } else {
-        const body = buildBody(fmt, comboName, prompt.trim(), stream, imageSizeCustom.trim() || imageSize, thinking)
+        const body = buildBody(fmt, requestModel, prompt.trim(), stream, imageSizeCustom.trim() || imageSize, thinking)
         let url = FMT_ENDPOINT[fmt]
         if (fmt === 'gemini') {
           url = stream
-            ? `/v1beta/models/${encodeURIComponent(comboName)}:streamGenerateContent?alt=sse`
-            : `/v1beta/models/${encodeURIComponent(comboName)}:generateContent`
+            ? `/v1beta/models/${encodeURIComponent(requestModel)}:streamGenerateContent?alt=sse`
+            : `/v1beta/models/${encodeURIComponent(requestModel)}:generateContent`
         }
 
         resp = await fetch(url, {
@@ -567,12 +573,31 @@ export default function TestPage() {
                       const isDef = c.is_default || c.owned_by === 'default' || !c.owned_by
                       return (
                         <option key={fullID} value={fullID}>
-                          {fullID}{isDef ? ' (默认)' : ` (${c.owned_by})`}
+                          {fullID}{isDef ? ' (默认)' : ` (${c.owned_by})`}{c.relay ? ' (relay)' : ''}
                         </option>
                       )
                     })}
                   </select>
                 </div>
+
+                {isRelayCombo && (
+                  <div>
+                    <div className="field-label" style={{ marginBottom: 5 }}>
+                      上游模型 ID <span className="dim">（透传，拼接为 {comboName}/&lt;model&gt;）</span>
+                    </div>
+                    <input
+                      value={relayModel}
+                      placeholder="例如 gpt-4o"
+                      onChange={e => setRelayModel(e.target.value)}
+                      disabled={state === 'streaming' || state === 'sending'}
+                    />
+                    <div className="dim" style={{ fontSize: 11, marginTop: 4 }}>
+                      {relayModel.trim()
+                        ? <>请求 model = <code>{requestModel}</code></>
+                        : 'Relay combo 必须填写上游模型 ID'}
+                    </div>
+                  </div>
+                )}
 
                 <div>
                   <div className="field-label" style={{ marginBottom: 5 }}>API 格式</div>
@@ -785,7 +810,7 @@ export default function TestPage() {
             <button
               className="btn-primary"
               onClick={send}
-              disabled={!prompt.trim() || !comboName || !cfg}
+              disabled={!prompt.trim() || !comboName || !cfg || (isRelayCombo && !relayModel.trim())}
               style={{ display: 'flex', alignItems: 'center', gap: 6, justifyContent: 'center', padding: '10px', width: '100%' }}
             >
               <SendIcon />发送请求

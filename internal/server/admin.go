@@ -17,7 +17,7 @@ import (
 
 func goRuntime() string { return runtime.Version() }
 
-var version = "0.11.1"
+var version = "0.12.0"
 
 func stateOf(c *gin.Context) *gateway.State {
 	v, _ := c.Get("state")
@@ -343,7 +343,7 @@ func adminInfo(c *gin.Context) {
 		if ownedBy == "" {
 			ownedBy = "default"
 		}
-		combos = append(combos, map[string]any{
+		cm := map[string]any{
 			"name":        combo.Name,
 			"owned_by":    ownedBy,
 			"is_default":  combo.IsDefault,
@@ -352,7 +352,11 @@ func adminInfo(c *gin.Context) {
 			"api_formats": combo.APIFormats(),
 			"strategy":    combo.Strategy,
 			"members":     members,
-		})
+		}
+		if combo.Relay {
+			cm["relay"] = true
+		}
+		combos = append(combos, cm)
 	}
 	providers := []map[string]any{}
 	for i := range svc.Config.Providers {

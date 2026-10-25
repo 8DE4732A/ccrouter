@@ -704,6 +704,8 @@ func buildCombo(c map[string]any, ctx string, providerMap map[string]*ProviderCo
 		return nil, errf("%s.strategy must be one of: fill-first, round-robin", ctx)
 	}
 
+	cc.Relay = toBool(c["relay"])
+
 	// members
 	membersRaw, ok := c["members"].([]any)
 	if !ok || len(membersRaw) == 0 {
@@ -724,7 +726,10 @@ func buildCombo(c map[string]any, ctx string, providerMap map[string]*ProviderCo
 			return nil, errf("%s.members[%d].provider %q is not defined in providers", ctx, j, providerName)
 		}
 		model := strings.TrimSpace(strVal(mm["model"]))
-		if model == "" {
+		if cc.Relay && model != "" {
+			return nil, errf("%s.members[%d].model must be omitted for relay combos (the client supplies it after the combo prefix)", ctx, j)
+		}
+		if !cc.Relay && model == "" {
 			return nil, errf("%s.members[%d].model must not be empty", ctx, j)
 		}
 

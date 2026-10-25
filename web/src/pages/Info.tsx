@@ -105,6 +105,7 @@ export default function InfoPage() {
                         <span key={f} className={`tag ${(FMT_COLOR as Record<string, string>)[f] ?? ''}`} style={{ fontSize: 10 }}>{f}</span>
                       ))}
                       <span className="tag" style={{ fontSize: 10 }}>{c.strategy}</span>
+                      {c.relay && <span className="tag" style={{ fontSize: 10 }}>relay</span>}
                     </div>
                   </div>
 
@@ -124,7 +125,9 @@ export default function InfoPage() {
                         }}>{i + 1}</span>
                         <span style={{ color: 'var(--text-3)' }}>{m.provider}</span>
                         <span style={{ color: 'var(--border-md)' }}>›</span>
-                        <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>{m.model}</code>
+                        <code style={{ fontFamily: 'var(--font-mono)', color: 'var(--text)' }}>
+                          {m.model ?? (c.relay ? '* (客户端提供)' : '')}
+                        </code>
                       </div>
                     ))}
                   </div>

@@ -107,7 +107,7 @@ export type ModelCost = {
 
 export type ComboMember = {
   provider: string
-  model: string
+  model?: string  // omitted on relay combos: the client supplies it
   upstream_api_format?: string  // optional: override the API format sent to this upstream
   context_window?: number
   max_output_tokens?: number
@@ -150,6 +150,8 @@ export type ComboConfig = {
   strategy: 'fill-first' | 'round-robin'
   members: ComboMember[]
   aliases?: string[]
+  /** Forward the model id after "<combo>/" instead of a fixed member model. */
+  relay?: boolean
 }
 
 export type PayloadScript = {
@@ -335,7 +337,8 @@ export type InfoCombo = {
   aliases: string[]
   api_formats: string[]
   strategy: string
-  members: { provider: string; model: string }[]
+  relay?: boolean
+  members: { provider: string; model?: string }[]
 }
 
 export type InfoProvider = {

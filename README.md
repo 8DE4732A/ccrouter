@@ -20,7 +20,7 @@
 - **Payload 脚本** — 转发前执行脚本改写请求 body / header（基于 [expr-lang/expr](https://github.com/expr-lang/expr)，天然沙箱）
 - **Streaming** — 正确处理 SSE 流式响应，含 token usage 嗅探和首帧错误检测
 - **请求体压缩** — 客户端可用 `Content-Encoding: gzip` / `deflate` / `br` / `zstd` 提交请求，网关自动解压后转发；provider 也可选用 gzip/deflate/br/zstd 压缩转发的 JSON 请求体
-- **Relay / BYOK 透传** — provider 可配置为 `relay: true`，不保存上游密钥，原样转发客户端自己的凭据，适合多用户各持密钥的场景
+- **Relay / BYOK 透传** — provider 可配置为 `relay: true`，不保存上游密钥，原样转发客户端自己的凭据；combo 也可配置为 `relay: true`，把客户端请求 `<combo>/<model>` 中的模型名原样转发给上游
 - **管理页面** — 内置 Web UI，支持单用户密码认证、实时统计、请求明细、MCP 状态与调试、热重载配置（`/admin/`）
 - **单二进制** — 前端静态资源通过 `go:embed` 内嵌，部署只需一个可执行文件
 
@@ -219,6 +219,34 @@ api_format:
   - anthropic   # → POST /v1/messages
 ```
 
+#### Relay combo（模型名透传）
+
+普通 combo 把客户端模型映射到 member 的固定 `model`。relay combo 则把客户端请求里 `<combo>/` 之后的部分原样转发给上游，member 只负责选择 provider 与回退顺序：
+
+```yaml
+combos:
+  - name: byok
+    relay: true
+    api_format: openai
+    strategy: fill-first
+    members:
+      - provider: byok-openai      # relay / keyed provider 均可
+      # model 必须省略
+      # cost: { input: 3, output: 15 }   # 动态模型无法自动定价，需手填
+```
+
+```bash
+# 客户端请求 byok/gpt-4o → 上游收到 {"model":"gpt-4o"}
+curl http://127.0.0.1:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"byok/gpt-4o","messages":[{"role":"user","content":"hi"}]}'
+```
+
+- 前缀匹配支持 `owned_by` 与别名：`team/byok/gpt-4o`、别名 `oa/gpt-4o` 都可以。
+- 斜杠后的模型可以继续包含 `/`，例如 `byok/anthropic/claude-3.5-sonnet`。
+- 只写 `byok`（不带模型）返回 400；未知前缀按原有 `unknown combo` 返回 400，不会被普通 combo 劫持。
+- 计费按 member 的 `cost` 计算；请求明细与统计记录真实上游模型名（`gpt-4o`）。
+- `/v1/models` 只列出 combo 名，无法枚举动态上游模型。
 
 ### Payload 改写脚本
 
@@ -230,7 +258,7 @@ api_format:
 |------|------|------|
 | `body` | map | 请求 body（JSON 解析后的 map，可读写） |
 | `headers` | map | 请求 headers（可读写） |
-| `combo` | string | 客户端传的 combo 名（只读） |
+| `combo` | string | 规范 combo 名（relay 请求不含 `<model>` 部分，只读） |
 | `path` | string | 请求路径，如 `/v1/chat/completions`（只读） |
 
 **内置函数：**

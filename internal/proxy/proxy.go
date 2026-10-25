@@ -162,14 +162,20 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		}
 	}
 
-	combo := s.Router.GetCombo(requestedModel)
-	if combo == nil {
+	combo, relayModel, ok := s.Router.ResolveRequest(requestedModel)
+	if !ok {
 		jsonErrorForFormat(w, apiFormat, 400, fmt.Sprintf("unknown combo: %q", requestedModel), "proxy_error")
+		return
+	}
+	comboName := combo.FullName()
+	if combo.RelayModelMissing(relayModel) {
+		jsonErrorForFormat(w, apiFormat, 400,
+			fmt.Sprintf("relay combo %q requires a model: use %s/{model}", comboName, comboName), "proxy_error")
 		return
 	}
 	if !combo.SupportsFormat(apiFormat) {
 		jsonErrorForFormat(w, apiFormat, 400, fmt.Sprintf("combo %q supports formats %v, but request was sent to %q endpoint",
-			requestedModel, combo.APIFormats(), apiFormat), "proxy_error")
+			comboName, combo.APIFormats(), apiFormat), "proxy_error")
 		return
 	}
 
@@ -178,15 +184,20 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 	clientGeminiKey := r.URL.Query().Get("key")
 
 	for {
-		providerName, model, upstreamFmt := s.Router.NextMemberWithFmt(requestedModel, attemptedMembers)
+		providerName, memberModel, upstreamFmt := s.Router.NextMemberWithFmt(comboName, attemptedMembers)
 		if providerName == "" {
-			jsonErrorForFormat(w, apiFormat, 503, fmt.Sprintf("all providers exhausted for combo %q", requestedModel), "proxy_error")
+			jsonErrorForFormat(w, apiFormat, 503, fmt.Sprintf("all providers exhausted for combo %q", comboName), "proxy_error")
 			return
+		}
+		// Relay combos forward the model id supplied after "<combo>/".
+		model := memberModel
+		if combo.Relay {
+			model = relayModel
 		}
 
 		km := s.KeyManagers[providerName]
 		providerCfg := s.providers[providerName]
-		relay := providerCfg.Relay
+		providerRelay := providerCfg.Relay
 
 		// Resolve the upstream API format to use for this member:
 		//   1. If provider natively supports the client format → use it directly (no translation).
@@ -246,7 +257,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 
 		attemptedKeys := map[string]bool{}
 		maxAttempts := providerCfg.MaxRetries + 1
-		if relay {
+		if providerRelay {
 			// A relay provider has no key pool: one attempt per combo member.
 			maxAttempts = 1
 		}
@@ -254,7 +265,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		handled := false
 		for i := 0; i < maxAttempts; i++ {
 			key := ""
-			if !relay {
+			if !providerRelay {
 				key = km.Get(model, attemptedKeys)
 				if key == "" {
 					break
@@ -262,7 +273,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 				attemptedKeys[key] = true
 			}
 			var headers http.Header
-			if relay {
+			if providerRelay {
 				headers = buildRelayHeaders(r)
 			} else {
 				headers = buildHeaders(r, key, upstreamFmt)
@@ -274,7 +285,7 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 			// Run enabled payload scripts in order (chained).
 			// Scripts operate on the upstream body (already translated).
 			actualBody, headers, scriptTag := s.runPayloadScripts(
-				upstreamBody, headers, requestedModel, r.URL.Path, providerName, model, upstreamFmt,
+				upstreamBody, headers, comboName, r.URL.Path, providerName, model, upstreamFmt,
 			)
 			// Combine translation tag and script tag into a single matched_payload string.
 			matchedPayload := joinTags(translationTag, scriptTag)
@@ -295,22 +306,22 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 			// Gemini credentials are a query parameter upstream; relay providers
 			// use the client's own key, keyed providers the selected pool key.
 			geminiKey := key
-			if relay {
+			if providerRelay {
 				geminiKey = clientGeminiKey
 			}
 
 			done, matched := s.attempt(w, r, t0, km, targetURL, headers, actualBody,
-				providerName, model, isStream, requestedModel, key, apiFormat, upstreamFmt, matchedPayload,
+				providerName, model, isStream, comboName, key, apiFormat, upstreamFmt, matchedPayload,
 				clientBody, geminiKey, clientCtx, upstreamCtx)
 			if done {
 				handled = true
 				break
 			}
 			if matched != nil {
-				s.record(requestedModel, providerName, model, key, apiFormat, upstreamFmt,
+				s.record(comboName, providerName, model, key, apiFormat, upstreamFmt,
 					isStream, nil, false, matched.Description,
 					map[string]any{}, t0, nil, &matchedPayload)
-				if relay {
+				if providerRelay {
 					// No key to cool down or rotate within this provider: fall through
 					// to the next combo member.
 					log.Printf("Relay rule matched: provider=%s model=%s rule=%q, trying next member",
@@ -327,10 +338,12 @@ func (s *Service) Handle(w http.ResponseWriter, r *http.Request, apiFormat strin
 		if handled {
 			return
 		}
-		if !relay {
+		if !providerRelay {
 			log.Printf("All keys exhausted: provider=%s model=%s, trying next member", providerName, model)
 		}
-		attemptedMembers[[2]string{providerName, model}] = true
+		// Key by the configured member pair: relay members have Model == "" and
+		// must stay distinguishable from the dynamic wire model.
+		attemptedMembers[[2]string{providerName, memberModel}] = true
 	}
 }
 

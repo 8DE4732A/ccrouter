@@ -179,6 +179,21 @@ combos:
             model: "deepseek-v4-flash"
             upstream_api_format: openai
 
+      # -------------------------------------------------------------------
+      # Relay combo：客户端请求 "<combo>/<model>"，斜杠后的模型原样转发。
+      # 需要一个 relay provider（见文件开头的 byok-openai 注释示例）。
+      # member 的 model 必须省略，只决定 provider 顺序与回退。
+      # -------------------------------------------------------------------
+      # - name: "byok"
+      #   relay: true
+      #   api_format: openai
+      #   strategy: "fill-first"
+      #   members:
+      #     - provider: byok-openai
+      #       # 可选：动态模型无法自动匹配 models.dev，价格需手动配置
+      #       # cost: { input: 3, output: 15 }
+      # 客户端请求 model="byok/gpt-4o" → 上游收到 {"model":"gpt-4o"}
+
   # =======================================================================
   # 自定义命名空间分组（如 team-a）
   # 客户端请求必须使用 <owned_by>/<combo_name> 进行区分，如 model="team-a/fast"

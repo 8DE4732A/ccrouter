@@ -139,7 +139,10 @@ func Dump(cfg *AppConfig) map[string]any {
 		}
 		members := make([]any, 0, len(c.Members))
 		for _, m := range c.Members {
-			mm := map[string]any{"provider": m.Provider, "model": m.Model}
+			mm := map[string]any{"provider": m.Provider}
+			if m.Model != "" {
+				mm["model"] = m.Model
+			}
 			if m.UpstreamAPIFormat != "" {
 				mm["upstream_api_format"] = m.UpstreamAPIFormat
 			}
@@ -177,6 +180,9 @@ func Dump(cfg *AppConfig) map[string]any {
 			"api_format": c.APIFormat,
 			"strategy":   c.Strategy,
 			"members":    members,
+		}
+		if c.Relay {
+			combo["relay"] = true
 		}
 		if len(c.Aliases) > 0 {
 			aliases := make([]any, len(c.Aliases))

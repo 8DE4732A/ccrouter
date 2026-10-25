@@ -1732,3 +1732,33 @@ combos:
 		t.Fatalf("relay provider leaked into key status: %+v", status.Providers)
 	}
 }
+
+func TestGeminiModelLookupForRelayCombo(t *testing.T) {
+	st, _ := newTestStateWithYAML(t, `
+providers:
+  - name: byok-gemini
+    relay: true
+    api:
+      - api_format: gemini
+        base_url: "http://127.0.0.1:1"
+    keys: []
+combos:
+  - name: byok
+    relay: true
+    api_format: gemini
+    members:
+      - provider: byok-gemini
+`)
+	r := Router(st)
+
+	rec := doGET(t, r, "/v1beta/models/byok/gemini-2.5-pro")
+	if rec.Code != 200 {
+		t.Fatalf("relay model lookup: status %d body %s", rec.Code, rec.Body.String())
+	}
+
+	// The bare combo name has no upstream model and must not match.
+	rec = doGET(t, r, "/v1beta/models/byok")
+	if rec.Code != 404 {
+		t.Fatalf("bare relay combo should be 404, got %d", rec.Code)
+	}
+}

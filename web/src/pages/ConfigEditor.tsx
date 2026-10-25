@@ -24,7 +24,7 @@ const EMPTY_PROVIDER = (): ProviderConfig => ({
 const EMPTY_GENERAL = (): GeneralConfig => ({ api_keys: [], proxy: undefined, request_timeout_seconds: undefined })
 const EMPTY_COMBO = (): ComboConfig => ({
   name: '', owned_by: 'default', is_default: true, api_format: ['openai'], strategy: 'fill-first',
-  members: [{ provider: '', model: '' }], aliases: [],
+  members: [{ provider: '', model: '' }], aliases: [], relay: false,
 })
 const EMPTY_PAYLOAD_SCRIPT = (): PayloadScript => ({ name: '', enabled: true, script: '' })
 
@@ -164,7 +164,7 @@ function ProviderDetail({
           <div style={{ display: 'flex', gap: 6 }}>
             {([
               [false, '密钥池'] as const,
-              [true, 'Relay 透传'] as const,
+              [true, 'Relay 凭据透传'] as const,
             ]).map(([isRelay, label]) => {
               const active = !!p.relay === isRelay
               return (
@@ -425,12 +425,13 @@ const COST_FIELDS: { key: keyof ModelCost; label: string }[] = [
 ]
 
 function ComboMemberRow({
-  member, index, total, providerNames, onChange, onRemove, onMoveUp, onMoveDown,
+  member, index, total, providerNames, relay, onChange, onRemove, onMoveUp, onMoveDown,
 }: {
   member: ComboMember
   index: number
   total: number
   providerNames: string[]
+  relay: boolean
   onChange: (next: ComboMember) => void
   onRemove: () => void
   onMoveUp: () => void
@@ -445,6 +446,7 @@ function ComboMemberRow({
   const hasParams = member.context_window != null || member.max_output_tokens != null || member.cost != null
   const patch = (next: Partial<ComboMember>) => onChange({ ...member, ...next })
   const num = (v: string): number | undefined => (v === '' ? undefined : Number(v))
+  const modelValue = member.model ?? ''
 
   // Snapshot the catalog entry into the member. Undefined fields are omitted
   // so the config dump stays clean; explicit zeros are preserved.
@@ -463,12 +465,12 @@ function ComboMemberRow({
   }
 
   const suggest = async () => {
-    if (!member.model.trim()) return
+    if (!modelValue.trim()) return
     setSuggesting(true)
     setSuggestMsg('')
     try {
       const res = await suggestModelsDev({
-        model: member.model.trim(),
+        model: modelValue.trim(),
         provider: member.provider || undefined,
         limit: 5,
       })
@@ -519,9 +521,18 @@ function ComboMemberRow({
           <option value="">— Provider —</option>
           {providerNames.map(n => <option key={n} value={n}>{n}</option>)}
         </select>
-        <input value={member.model} placeholder="上游模型 ID"
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
-          onChange={e => patch({ model: e.target.value })} />
+        {relay ? (
+          <div style={{
+            fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-3)',
+            padding: '6px 8px', border: '1px dashed var(--border)', borderRadius: 'var(--radius)',
+          }}>
+            透传（客户端 &lt;combo&gt;/&lt;model&gt; 的斜杠后部分）
+          </div>
+        ) : (
+          <input value={modelValue} placeholder="上游模型 ID"
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
+            onChange={e => patch({ model: e.target.value })} />
+        )}
         {/* upstream_api_format: empty = same as combo's client format (no translation) */}
         <select
           value={member.upstream_api_format ?? ''}
@@ -553,12 +564,14 @@ function ComboMemberRow({
           {expanded ? '收起参数' : `模型参数与价格${hasParams ? ' ●' : ''}`}
         </button>
         <button type="button" className="btn btn-sm" style={smallBtn}
-          onClick={suggest} disabled={suggesting || !member.model.trim()}>
+          onClick={suggest} disabled={suggesting || relay || !modelValue.trim()}>
           {suggesting ? '查询中…' : '自动获取'}
         </button>
-        <button type="button" className="btn btn-sm" style={smallBtn} onClick={() => setPickerOpen(true)}>
-          从 models.dev 选择
-        </button>
+        {!relay && (
+          <button type="button" className="btn btn-sm" style={smallBtn} onClick={() => setPickerOpen(true)}>
+            从 models.dev 选择
+          </button>
+        )}
         {member.models_dev_source && <code style={{ fontSize: 11 }}>{member.models_dev_source}</code>}
         {hasParams && (
           <button type="button" className="btn btn-sm" style={smallBtn} onClick={clearParams}>清除参数</button>
@@ -609,7 +622,7 @@ function ComboMemberRow({
 
       <ModelsDevPicker
         open={pickerOpen}
-        initialQuery={member.model}
+        initialQuery={modelValue}
         providerHint={member.provider}
         onClose={() => setPickerOpen(false)}
         onSelect={applyEntry}
@@ -725,6 +738,25 @@ function ComboDetail({
             <option value="round-robin">round-robin — 每次请求轮换 member</option>
           </select>
         </FieldRow>
+        <FieldRow label="模式" hint={cb.relay ? '客户端模型名斜杠后的部分原样转发给上游' : 'member 固定映射到指定上游模型'}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={Boolean(cb.relay)}
+                onChange={e => onUpdate({ relay: e.target.checked })}
+              />
+              Relay 模型透传：客户端请求 <code style={{ fontFamily: 'var(--font-mono)' }}>{fullPrimary}/&lt;model&gt;</code>
+            </label>
+            {cb.relay && (
+              <div style={{ fontSize: 11, color: 'var(--text-3)', lineHeight: 1.6 }}>
+                例如请求 <code style={{ fontFamily: 'var(--font-mono)' }}>{fullPrimary}/gpt-4o</code>，
+                上游收到的模型为 <code style={{ fontFamily: 'var(--font-mono)' }}>gpt-4o</code>。
+                member 只决定 provider 顺序与回退，模型无法自动枚举，价格需手动配置。
+              </div>
+            )}
+          </div>
+        </FieldRow>
       </div>
 
       {/* API formats */}
@@ -772,7 +804,7 @@ function ComboDetail({
             display: 'grid', gridTemplateColumns: '24px 1fr 1fr 180px 84px',
             gap: 8, padding: '0 10px', marginBottom: 2,
           }}>
-            {['#', 'Provider', '上游模型 ID', '上游 API 格式（可选）', '操作'].map((h, i) => (
+            {['#', 'Provider', cb.relay ? '上游模型（透传）' : '上游模型 ID', '上游 API 格式（可选）', '操作'].map((h, i) => (
               <span key={i} style={{ fontSize: 11, color: 'var(--text-3)' }}>{h}</span>
             ))}
           </div>
@@ -783,6 +815,7 @@ function ComboDetail({
               index={mi}
               total={cb.members.length}
               providerNames={providerNames}
+              relay={Boolean(cb.relay)}
               onChange={next => onUpdate({
                 members: cb.members.map((mm, mj): ComboMember => mj === mi ? next : mm),
               })}
@@ -1303,11 +1336,13 @@ export default function ConfigEditor() {
           ...c,
           owned_by: c.owned_by || 'default',
           is_default: Boolean(c.is_default),
+          relay: c.relay || undefined,
           api_format: (c.api_format as ApiFormat[]).length === 1
             ? (c.api_format as ApiFormat[])[0]
             : c.api_format,
           members: c.members.map(m => {
             const mm = { ...m }
+            if (c.relay) delete mm.model
             if (!mm.upstream_api_format) delete mm.upstream_api_format
             if (mm.context_window == null) delete mm.context_window
             if (mm.max_output_tokens == null) delete mm.max_output_tokens
@@ -1749,6 +1784,11 @@ export default function ConfigEditor() {
                                       <span className="tag" style={{ fontSize: 9, padding: '1px 4px' }}>
                                         {cb.members.length}m
                                       </span>
+                                      {cb.relay && (
+                                        <span className="tag" style={{ fontSize: 9, padding: '1px 4px' }}>
+                                          relay
+                                        </span>
+                                      )}
                                       {(cb.aliases ?? []).length > 0 && (
                                         <span className="tag" style={{ fontSize: 9, padding: '1px 4px', color: 'var(--text-2)' }}>
                                           +{(cb.aliases ?? []).length}

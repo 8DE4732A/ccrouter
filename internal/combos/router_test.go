@@ -162,3 +162,87 @@ func TestOwnedByRoundRobinIsolation(t *testing.T) {
 	}
 }
 
+func relayCombo(name, ownedBy string, aliases []string, members [][2]string) *config.ComboConfig {
+	c := makeCombo(name, "fill-first", members)
+	c.Relay = true
+	c.OwnedBy = ownedBy
+	c.Aliases = aliases
+	return c
+}
+
+func TestResolveRequest(t *testing.T) {
+	normal := makeCombo("fast", "fill-first", [][2]string{{"sn", "flash"}})
+	relay := relayCombo("byok", "", nil, [][2]string{{"sn", ""}})
+	relayAlias := relayCombo("oa", "", []string{"openai"}, [][2]string{{"sn", ""}})
+	owned := relayCombo("byok", "team", nil, [][2]string{{"sn", ""}})
+	longest := relayCombo("b", "a", nil, [][2]string{{"sn", ""}}) // full name a/b
+
+	r := NewRouter(comboSlice(normal, relay, relayAlias, owned, longest))
+
+	cases := []struct {
+		request   string
+		wantCombo string
+		wantModel string
+		wantOK    bool
+	}{
+		{"fast", "fast", "", true},
+		{"byok", "byok", "", true},
+		{"byok/gpt-4o", "byok", "gpt-4o", true},
+		{"byok/anthropic/claude-3.5", "byok", "anthropic/claude-3.5", true},
+		{"openai/gpt-4o", "oa", "gpt-4o", true},
+		{"team/byok", "team/byok", "", true},
+		{"team/byok/gpt-4o", "team/byok", "gpt-4o", true},
+		{"a/b/gpt-4o", "a/b", "gpt-4o", true},
+		{"byok/", "", "", false},
+		{"fast/gpt-4o", "", "", false},
+		{"unknown/gpt-4o", "", "", false},
+	}
+	for _, tc := range cases {
+		combo, model, ok := r.ResolveRequest(tc.request)
+		if ok != tc.wantOK {
+			t.Fatalf("%q: ok=%v want %v", tc.request, ok, tc.wantOK)
+		}
+		if !ok {
+			continue
+		}
+		if combo.FullName() != tc.wantCombo || model != tc.wantModel {
+			t.Fatalf("%q: got (%s,%q), want (%s,%q)", tc.request,
+				combo.FullName(), model, tc.wantCombo, tc.wantModel)
+		}
+	}
+}
+
+func TestNextMemberRelayEmptyModelBookkeeping(t *testing.T) {
+	relay := relayCombo("byok", "", nil, [][2]string{{"sn", ""}, {"ds", ""}})
+	r := NewRouter(comboSlice(relay))
+
+	provider, model, _ := r.NextMemberWithFmt("byok", map[[2]string]bool{})
+	if provider != "sn" || model != "" {
+		t.Fatalf("first member = (%q,%q)", provider, model)
+	}
+	attempted := map[[2]string]bool{{"sn", ""}: true}
+	provider, model, _ = r.NextMemberWithFmt("byok", attempted)
+	if provider != "ds" || model != "" {
+		t.Fatalf("second member = (%q,%q)", provider, model)
+	}
+}
+
+func TestMemberRelayMatchesByProvider(t *testing.T) {
+	cost := &config.ComboMemberCost{Input: func() *float64 { v := 1.0; return &v }()}
+	relay := relayCombo("byok", "", nil, [][2]string{{"sn", ""}})
+	relay.Members[0].Cost = cost
+	normal := makeCombo("fast", "fill-first", [][2]string{{"sn", "flash"}})
+	normal.Members[0].Cost = cost
+	r := NewRouter(comboSlice(relay, normal))
+
+	m, ok := r.Member("byok", "sn", "any-upstream-model")
+	if !ok || m.Cost != cost {
+		t.Fatalf("relay cost member = %+v, ok=%v", m, ok)
+	}
+	if _, ok := r.Member("fast", "sn", "wrong-model"); ok {
+		t.Fatal("normal combo must match the exact model")
+	}
+	if m, ok := r.Member("fast", "sn", "flash"); !ok || m.Cost != cost {
+		t.Fatalf("normal cost member = %+v, ok=%v", m, ok)
+	}
+}

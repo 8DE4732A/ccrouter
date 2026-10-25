@@ -61,8 +61,8 @@ func getGeminiModel(c *gin.Context, state *gateway.State) {
 	name = strings.TrimPrefix(name, "models/")
 	name = strings.Trim(name, "/")
 	svc := state.Service()
-	combo := svc.Router.GetCombo(name)
-	if combo == nil || !combo.SupportsFormat("gemini") {
+	combo, relayModel, ok := svc.Router.ResolveRequest(name)
+	if !ok || !combo.SupportsFormat("gemini") || combo.RelayModelMissing(relayModel) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error": gin.H{
 				"code":    http.StatusNotFound,

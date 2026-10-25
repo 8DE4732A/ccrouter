@@ -74,6 +74,31 @@ func (r *Router) GetCombo(name string) *config.ComboConfig {
 	return r.combos[r.resolve(name)]
 }
 
+// ResolveRequest resolves a client model name to a combo and, for relay
+// combos, the upstream model id after "<combo>/".
+//
+// Exact combo names and aliases win. Otherwise the name is split at '/' from
+// the right, so the first matching relay combo prefix is the longest one; the
+// remainder (which may itself contain "/") is returned as upstreamModel.
+// Non-relay combos never participate in prefix matching, so unknown models
+// keep returning false.
+func (r *Router) ResolveRequest(name string) (*config.ComboConfig, string, bool) {
+	if c := r.GetCombo(name); c != nil {
+		return c, "", true
+	}
+	for i := len(name) - 1; i > 0; i-- {
+		if name[i] != '/' || i == len(name)-1 {
+			continue
+		}
+		c := r.GetCombo(name[:i])
+		if c == nil || !c.Relay {
+			continue
+		}
+		return c, name[i+1:], true
+	}
+	return nil, "", false
+}
+
 // NextMember returns the next (provider, model) pair not yet in attempted.
 // Returns "" provider when all members have been attempted.
 func (r *Router) NextMember(name string, attempted map[[2]string]bool) (string, string) {
@@ -116,19 +141,24 @@ func (r *Router) NextMemberWithFmt(name string, attempted map[[2]string]bool) (s
 }
 
 // Member returns the configured member for a (provider, model) pair,
-// resolving combo aliases the same way NextMemberWithFmt does. The first
-// matching member wins when a combo repeats a pair (routing already treats
-// repeated pairs as one attempt). combos is immutable after NewRouter, so no
-// lock is needed.
+// resolving combo aliases the same way NextMemberWithFmt does. Relay combos
+// have no configured model and match by provider. The first matching member
+// wins when a combo repeats a pair (routing already treats repeated pairs as
+// one attempt). combos is immutable after NewRouter, so no lock is needed.
 func (r *Router) Member(name, provider, model string) (*config.ComboMember, bool) {
-	c := r.combos[r.resolve(name)]
+	c := r.GetCombo(name)
 	if c == nil {
 		return nil, false
 	}
 	for i := range c.Members {
-		if c.Members[i].Provider == provider && c.Members[i].Model == model {
-			return &c.Members[i], true
+		m := &c.Members[i]
+		if m.Provider != provider {
+			continue
 		}
+		if !c.Relay && m.Model != model {
+			continue
+		}
+		return m, true
 	}
 	return nil, false
 }

@@ -1531,3 +1531,100 @@ func TestRelayDumpRoundtrip(t *testing.T) {
 		t.Fatalf("roundtrip lost relay fields: %+v", rebuilt.Providers[0])
 	}
 }
+
+const relayComboYAML = `
+providers:
+  - name: byok-openai
+    relay: true
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys: []
+combos:
+  - name: byok
+    relay: true
+    api_format: openai
+    members:
+      - provider: byok-openai
+`
+
+func TestRelayComboLoadsWithoutMemberModel(t *testing.T) {
+	cfg := loadFromText(t, relayComboYAML)
+	if len(cfg.Combos) != 1 {
+		t.Fatalf("expected 1 combo, got %d", len(cfg.Combos))
+	}
+	c := cfg.Combos[0]
+	if !c.Relay {
+		t.Fatal("expected relay combo")
+	}
+	if len(c.Members) != 1 || c.Members[0].Model != "" {
+		t.Fatalf("unexpected members: %+v", c.Members)
+	}
+}
+
+func TestRejectsMemberModelOnRelayCombo(t *testing.T) {
+	_, err := loadFromTextErr(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: byok
+    relay: true
+    api_format: openai
+    members:
+      - provider: sn
+        model: gpt-4o
+`)
+	if err == nil || !strings.Contains(err.Error(), "must be omitted for relay combos") {
+		t.Fatalf("expected relay member model rejection, got %v", err)
+	}
+}
+
+func TestNonRelayComboStillRequiresMemberModel(t *testing.T) {
+	_, err := loadFromTextErr(t, `
+providers:
+  - name: sn
+    api:
+      - api_format: openai
+        base_url: "https://upstream.test/v1"
+    keys:
+      - key: sk-1
+combos:
+  - name: fast
+    api_format: openai
+    members:
+      - provider: sn
+`)
+	if err == nil || !strings.Contains(err.Error(), "model must not be empty") {
+		t.Fatalf("expected member model error, got %v", err)
+	}
+}
+
+func TestRelayComboDumpRoundtrip(t *testing.T) {
+	cfg := loadFromText(t, relayComboYAML)
+	dumped := Dump(cfg)
+	groups := dumped["combos"].([]any)
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(groups))
+	}
+	group := groups[0].(map[string]any)
+	combo := group["combos"].([]any)[0].(map[string]any)
+	if combo["relay"] != true {
+		t.Fatalf("relay missing from dump: %+v", combo)
+	}
+	member := combo["members"].([]any)[0].(map[string]any)
+	if _, ok := member["model"]; ok {
+		t.Fatalf("relay member must not dump model: %+v", member)
+	}
+	rebuilt, err := Build(dumped)
+	if err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+	if !rebuilt.Combos[0].Relay || rebuilt.Combos[0].Members[0].Model != "" {
+		t.Fatalf("roundtrip lost relay combo: %+v", rebuilt.Combos[0])
+	}
+}

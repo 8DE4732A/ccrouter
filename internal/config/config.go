@@ -285,6 +285,9 @@ type ComboConfig struct {
 	Strategy  string        `json:"strategy" yaml:"strategy"`
 	Members   []ComboMember `json:"members" yaml:"members"`
 	Aliases   []string      `json:"aliases,omitempty" yaml:"aliases,omitempty"`
+	// Relay makes the combo forward the model id embedded after "<combo>/".
+	// Members must omit their model; routing/fallback is still by member order.
+	Relay bool `json:"relay,omitempty" yaml:"relay,omitempty"`
 }
 
 // FullName returns the primary model identifier for routing and /v1/models:
@@ -295,6 +298,12 @@ func (c *ComboConfig) FullName() string {
 		return c.Name
 	}
 	return c.OwnedBy + "/" + c.Name
+}
+
+// RelayModelMissing reports whether this relay combo matched without an
+// upstream model after "<combo>/".
+func (c *ComboConfig) RelayModelMissing(upstreamModel string) bool {
+	return c.Relay && upstreamModel == ""
 }
 
 // FullAliases returns the alias model identifiers:

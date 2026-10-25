@@ -146,6 +146,9 @@ ComboConfig:
                                            # round-robin：每次请求轮询 member
   members:     <list[ComboMember]>         # 至少一个
   aliases:     [list[string], default=[]] # 额外的客户端可用名称（透明转发到本 combo）
+  relay:       [bool, default=false]      # true：客户端请求 "<combo>/<model>"，斜杠后的模型原样转发；
+                                           # member 的 model 必须省略，只用于选择 provider / 回退顺序
+                                           # 例：combo 名 byok + 请求 byok/gpt-4o → 上游收到 gpt-4o
 
 
 
@@ -156,7 +159,7 @@ ComboConfig:
 
 ComboMember:
   provider:            <string>   # 必须与某个 ProviderConfig.name 一致
-  model:               <string>   # 转发给上游的真实模型 ID
+  model:               <string>   # 转发给上游的真实模型 ID；relay combo 中必须省略
   upstream_api_format: [string]   # 可选：指定发往此上游的 API 格式（用于跨格式翻译）
                                   # 解析优先级：
                                   #   1. provider 原生支持客户端格式 → 直接转发（忽略本字段）
